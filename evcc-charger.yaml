@@ -1,0 +1,76 @@
+# Ausschnitt für die evcc.yaml
+# BRIDGE = Adresse der ocpp-bridge, z. B. http://192.168.1.10:8887
+#          (oder http://ocpp-bridge:8887, wenn EVCC im selben Docker-Netz läuft)
+# "_" steht für "die (einzige) verbundene Wallbox". Bei mehreren Wallboxen
+# stattdessen die Charge-Point-ID einsetzen, z. B. /api/SN12345678/...
+
+chargers:
+  - name: solax
+    type: custom
+    status:
+      source: http
+      uri: http://192.168.1.10:8887/api/_/state
+      cache: 1s
+      jq: .status
+    enabled:
+      source: http
+      uri: http://192.168.1.10:8887/api/_/state
+      cache: 1s
+      jq: .enabled
+    enable:
+      source: http
+      uri: http://192.168.1.10:8887/api/_/enable
+      method: POST
+      body: ${enable}
+    maxcurrent:
+      source: http
+      uri: http://192.168.1.10:8887/api/_/maxcurrent
+      method: POST
+      body: ${maxcurrent:%d}
+    # Messwerte (Leistung in W, Zählerstand in kWh, Ströme in A)
+    power:
+      source: http
+      uri: http://192.168.1.10:8887/api/_/state
+      cache: 1s
+      jq: .power
+    energy:
+      source: http
+      uri: http://192.168.1.10:8887/api/_/state
+      cache: 1s
+      jq: .energy
+    currents:
+      - source: http
+        uri: http://192.168.1.10:8887/api/_/state
+        cache: 1s
+        jq: .currents[0]
+      - source: http
+        uri: http://192.168.1.10:8887/api/_/state
+        cache: 1s
+        jq: .currents[1]
+      - source: http
+        uri: http://192.168.1.10:8887/api/_/state
+        cache: 1s
+        jq: .currents[2]
+    # Fahrzeugerkennung über RFID-/Plug&Charge-Tag (optional)
+    identify:
+      source: http
+      uri: http://192.168.1.10:8887/api/_/state
+      cache: 1s
+      jq: .idtag
+    # 1/3-Phasen-Umschaltung (optional, nur wenn die Wallbox das per OCPP kann)
+    # tos: true
+    # phases1p3p:
+    #   source: http
+    #   uri: http://192.168.1.10:8887/api/_/phases
+    #   method: POST
+    #   body: ${phases}
+
+loadpoints:
+  - title: Garage
+    charger: solax
+    mode: pv
+    # Min-/Max-Strom und Phasen stellt man in aktuellen EVCC-Versionen in der Oberfläche ein.
+
+# Mit API_TOKEN in der Bridge jedem Eintrag hinzufügen:
+#     headers:
+#       - Authorization: Bearer <TOKEN>

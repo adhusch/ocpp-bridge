@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OCPP Bridge</title>
+<style>
+  :root {
+    --bg: #f4f2ee; --card: #ffffff; --ink: #1d1c1a; --muted: #6f6b64; --line: #e4e0d8;
+    --accent: #1f7a4d; --warn: #b4531a; --off: #8a857c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151413; --card: #1f1e1c; --ink: #ece9e3; --muted: #9c978e; --line: #33312d;
+            --accent: #4cc38a; --warn: #f0905a; --off: #77736b; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: -.01em; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin-bottom: 16px; }
+  .head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .id { font-weight: 600; font-size: 16px; }
+  .pill { display: inline-block; padding: 2px 10px; border-radius: 99px; font-size: 12px; font-weight: 600;
+          border: 1px solid currentColor; }
+  .pill.on { color: var(--accent); } .pill.off { color: var(--off); } .pill.err { color: var(--warn); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin: 16px 0; }
+  .k { color: var(--muted); font-size: 12px; } .v { font-size: 18px; font-variant-numeric: tabular-nums; }
+  .meta { color: var(--muted); font-size: 12px; }
+  button { font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--line);
+           background: transparent; color: var(--ink); cursor: pointer; }
+  button:hover { border-color: var(--ink); }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  ol { list-style: none; padding: 0; margin: 0; font-size: 13px; }
+  li { padding: 6px 0; border-top: 1px solid var(--line); display: flex; gap: 10px; }
+  li time { color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
+  .empty { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>OCPP Bridge</h1>
+  <p class="sub">Wallbox ⇄ OCPP 1.6J ⇄ Bridge ⇄ HTTP ⇄ EVCC · aktualisiert sich alle 3 s</p>
+  <div id="chargers"><div class="card empty">Noch keine Wallbox verbunden.</div></div>
+  <div class="card"><div class="id" style="margin-bottom:8px">Ereignisse</div><ol id="events"></ol></div>
+</main>
+<script>
+const token = new URLSearchParams(location.search).get("token");
+const H = token ? { Authorization: "Bearer " + token } : {};
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmt = (v, d = 1) => v == null ? "–" : Number(v).toLocaleString("de-DE", { maximumFractionDigits: d });
+const label = { A: "kein Fahrzeug", B: "verbunden", C: "lädt", F: "Fehler" };
+
+async function act(cp, a) {
+  const r = await fetch(`api/${encodeURIComponent(cp)}/${a}`, { method: "POST", headers: H });
+  alert(a + ": " + (await r.text()));
+  load();
+}
+
+function card(c) {
+  const cls = !c.connected ? "off" : c.status === "F" ? "err" : c.status === "C" ? "on" : "off";
+  return `<div class="card">
+    <div class="head">
+      <div><span class="id">${esc(c.cp_id)}</span> <span class="meta">${esc(c.vendor)} ${esc(c.model)} ${c.firmware ? "· FW " + esc(c.firmware) : ""}</span></div>
+      <span class="pill ${cls}">${c.connected ? esc(c.ocpp_status) + " · " + (label[c.status] || c.status) : "offline"}</span>
+    </div>
+    <div class="grid">
+      <div><div class="k">Leistung</div><div class="v">${fmt(c.power / 1000, 2)} kW</div></div>
+      <div><div class="k">Ströme L1/L2/L3</div><div class="v">${c.currents.map(x => fmt(x)).join(" / ")} A</div></div>
+      <div><div class="k">Zählerstand</div><div class="v">${fmt(c.energy, 2)} kWh</div></div>
+      <div><div class="k">Sitzung</div><div class="v">${fmt(c.session_energy ?? c.last_session_kwh, 2)} kWh</div></div>
+      <div><div class="k">EVCC-Vorgabe</div><div class="v">${c.desired_enabled ? fmt(c.max_current) + " A" : "Pause"}${c.phases ? " · " + c.phases + "p" : ""}</div></div>
+      <div><div class="k">Transaktion</div><div class="v">${c.transaction_id ? "#" + c.transaction_id : "–"}</div></div>
+    </div>
+    <p class="meta">ID-Tag: ${esc(c.idtag) || "–"} · Ladeprofil: ${esc(c.last_profile_status) || "–"} · Fehlercode: ${esc(c.error_code)} ${esc(c.status_info)}</p>
+    <div class="actions">
+      <button onclick="act('${esc(c.cp_id)}','start')">Remote Start</button>
+      <button onclick="act('${esc(c.cp_id)}','stop')">Remote Stop</button>
+      <button onclick="act('${esc(c.cp_id)}','apply')">Sollwert senden</button>
+      <button onclick="act('${esc(c.cp_id)}','unlock')">Entriegeln</button>
+      <button onclick="act('${esc(c.cp_id)}','setup')">Neu einrichten</button>
+    </div>
+  </div>`;
+}
+
+async function load() {
+  try {
+    const [cs, ev] = await Promise.all([
+      fetch("api/chargers", { headers: H }).then(r => r.json()),
+      fetch("api/events", { headers: H }).then(r => r.json()),
+    ]);
+    document.getElementById("chargers").innerHTML = cs.length ? cs.map(card).join("")
+      : '<div class="card empty">Noch keine Wallbox verbunden.</div>';
+    document.getElementById("events").innerHTML = ev.slice(0, 60).map(e =>
+      `<li><time>${new Date(e.ts * 1000).toLocaleTimeString("de-DE")}</time><span><b>${esc(e.cp)}</b> ${esc(e.text)}</span></li>`
+    ).join("") || '<li class="empty">–</li>';
+  } catch (e) { console.error(e); }
+}
+load(); setInterval(load, 3000);
+</script>
+</body>
+</html>
