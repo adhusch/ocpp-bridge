@@ -71,6 +71,7 @@ class Sim(CP):
         if SOLAX_QUIRKS:
             self.config = {
                 "AuthorizeRemoteTxRequests": "false",
+                "ClockAlignedDataInterval": "900",
                 "MeterValuesSampledData": "Current.Import,Voltage,Energy.Active.Import.Register,Frequency,Power.Active.Import,Power.Factor",
                 "MeterValueSampleInterval": "60",
                 "NumberOfConnectors": "1",
@@ -216,8 +217,14 @@ class Sim(CP):
         await self.call(call.MeterValues(**kw))
 
     async def meter_loop(self):
+        import time
+        last_aligned = time.time()
         while True:
             await asyncio.sleep(METER_EVERY)
+            aligned = int(self.config.get("ClockAlignedDataInterval", "0") or 0)
+            if self.tx_id is None and aligned > 0 and time.time() - last_aligned >= aligned:
+                last_aligned = time.time()
+                await self.send_meter()  # uhr-synchrone Messwerte auch im Leerlauf
             if self.status == "Charging":
                 a = self.eff_current()
                 self.power_w = 230.0 * a * self.phases

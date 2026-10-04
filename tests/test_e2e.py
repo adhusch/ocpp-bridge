@@ -262,18 +262,20 @@ def test_connect_without_id_in_path(tmp_path):
 
 def test_solax_quirks_watt_profiles(tmp_path):
     # Verhalten der echten Solax X3-HAC FW 012.04 (aus dem Log des Nutzers)
-    with running(tmp_path, sim_env={"SOLAX_QUIRKS": "1"}) as e:
+    with running(tmp_path, bridge_env={"METER_ALIGNED_INTERVAL": "2"}, sim_env={"SOLAX_QUIRKS": "1"}) as e:
         assert any("Ladeprofile in Watt" in t for t in e.events())
         recv = e.simstate()["received"]
         assert not any(r.startswith("ChangeConfiguration MeterValuesSampledData") for r in recv)  # readonly
-        assert e.state()["energy"] is None  # noch kein Zählerstand → ehrlich "unbekannt"
+        assert "ChangeConfiguration ClockAlignedDataInterval=2" in recv
+        # Zählerstand kommt über uhr-synchrone Messwerte auch ohne Ladevorgang
+        wait_for(lambda: (s := e.state())["energy_known"] and s["energy"] == pytest.approx(123.456),
+                 msg="Zählerstand im Leerlauf")
         http("POST", e.api("/api/_/maxcurrent"), "10")
         http("POST", e.api("/api/_/enable"), "true")
         e.simctl("plug")
         wait_for(lambda: (s := e.state())["status"] == "C" and s["currents"][0] == 10.0, msg="lädt mit 10 A")
         sim = e.simstate()
         assert sim["limit_w"] == 6900.0 and sim["current_a"] == 10.0
-        assert e.state()["energy"] is not None
         http("POST", e.api("/api/_/enable"), "false")
         wait_for(lambda: e.state()["ocpp_status"] == "SuspendedEVSE", msg="0 W pausiert")
 
@@ -296,7 +298,7 @@ def test_unknown_charger_reports_offline(tmp_path):
         env.start_bridge()
         st = env.state("5030B002112D0P")
         assert st["status"] == "A" and st["connected"] is False and st["enabled"] is False
-        assert st["power"] == 0 and st["energy"] is None
+        assert st["power"] == 0 and st["energy"] == 0 and st["energy_known"] is False
         assert http("POST", env.api("/api/5030B002112D0P/maxcurrent"), "10")["result"] == "stored"
     finally:
         env.close()

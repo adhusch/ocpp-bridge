@@ -82,8 +82,9 @@ loadpoints:
     return p
 
 
-def test_with_real_evcc(tmp_path):
-    env = Env(tmp_path, {}, {"METER_EVERY": "2"})
+@pytest.mark.parametrize("quirks", ["0", "1"], ids=["ampere-profile", "solax-watt-profile"])
+def test_with_real_evcc(tmp_path, quirks):
+    env = Env(tmp_path, {}, {"METER_EVERY": "2", "SOLAX_QUIRKS": quirks})
     evcc_port, house_port = free_port(), free_port()
     procs = []
     try:
@@ -123,17 +124,18 @@ def test_with_real_evcc(tmp_path):
         # 2) Sofortladen → 16 A, 3-phasig
         set_mode("now")
         wait_for(lambda: (l := lp())["charging"] and l["chargePower"] > 10000, timeout=60, msg="Sofortladen 16 A")
-        assert env.simstate()["limit_a"] == 16.0
+        assert env.simstate()["current_a"] == 16.0
 
         # 3) PV-Überschuss ~6 kW → Strom wird heruntergeregelt
         pv(6000)
         set_mode("pv")
-        wait_for(lambda: 6.0 <= env.simstate()["limit_a"] <= 8.0 and env.simstate()["phases"] in (0, 3),
+        wait_for(lambda: 6.0 <= env.simstate()["current_a"] <= 8.0 and env.simstate()["phases"] == 3,
                  timeout=90, msg="PV-Regelung 3p")
 
         # 4) wenig PV → Umschaltung auf 1 Phase
         pv(2500)
-        wait_for(lambda: env.simstate()["phases"] == 1 and lp()["phasesActive"] == 1 and lp()["charging"],
+        wait_for(lambda: (s := env.simstate())["phases"] == 1 and 6.0 <= s["current_a"] <= 10.0
+                 and lp()["phasesActive"] == 1 and lp()["charging"],
                  timeout=150, msg="Umschaltung 1p")
 
         # 5) zu wenig PV → Pause (0 A, Transaktion bleibt)

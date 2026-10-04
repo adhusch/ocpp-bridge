@@ -333,6 +333,10 @@ class ChargePoint(OcppChargePoint):
             await self._configure_measurands()
         if self.cfg.meter_interval > 0:
             await self._change_config("MeterValueSampleInterval", str(self.cfg.meter_interval))
+        if self.cfg.meter_aligned_interval > 0:
+            # liefert den Zählerstand auch ohne Ladevorgang (manche Wallboxen, z. B. Solax,
+            # lehnen TriggerMessage MeterValues im Leerlauf ab)
+            await self._change_config("ClockAlignedDataInterval", str(self.cfg.meter_aligned_interval))
         await self._change_config("WebSocketPingInterval", "30", quiet=True)
 
         if self.supports_trigger:

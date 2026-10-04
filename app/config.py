@@ -35,6 +35,8 @@ class Config:
     connector_id: int = field(default_factory=lambda: _int("CONNECTOR_ID", 1))
     heartbeat_interval: int = field(default_factory=lambda: _int("HEARTBEAT_INTERVAL", 60))
     meter_interval: int = field(default_factory=lambda: _int("METER_INTERVAL", 10))
+    # Uhr-synchrone Messwerte auch ohne Ladevorgang (ClockAlignedDataInterval), 0 = nicht ändern
+    meter_aligned_interval: int = field(default_factory=lambda: _int("METER_ALIGNED_INTERVAL", 60))
     meter_measurands: str = field(
         default_factory=lambda: os.environ.get(
             "METER_MEASURANDS",

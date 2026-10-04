@@ -65,7 +65,7 @@ Stand 04.10.2026, **Solax X3-HAC** (Modell `SPACS000001`, Firmware `012.04`), Br
 **Eigenheiten der Solax, die die Bridge berücksichtigt**
 - Die Box meldet ihre Ladeprofil-Einheit unter dem falsch geschriebenen Schlüssel `ChargingSchduleAllowedChargingRate` mit dem Wert `Power`. Die Bridge erkennt das und schickt Ladeprofile in **Watt** (Strom × 230 V × Phasen). Lädt das Auto mit weniger Phasen als angenommen, rechnet sie das Limit anhand der gemessenen Ströme nach. Mit `RATE_UNIT=A` lässt sich das übersteuern.
 - `MeterValuesSampledData` ist schreibgeschützt. Die Box liefert fest Strom, Spannung, Energie, Frequenz, Leistung und Leistungsfaktor, was für EVCC reicht.
-- `TriggerMessage MeterValues` wird abgelehnt. Bis zur ersten Messung (spätestens beim Laden) meldet die Bridge den Zählerstand deshalb als unbekannt statt 0.
+- `TriggerMessage MeterValues` wird abgelehnt, im Leerlauf kommen also keine Messwerte auf Anfrage. Die Bridge stellt deshalb `ClockAlignedDataInterval` von 900 auf 60 s (`METER_ALIGNED_INTERVAL`), damit die Box auch ohne Ladevorgang regelmäßig den Zählerstand schickt. Bis zum allerersten Zählerstand meldet sie EVCC 0 (`energy_known: false` im JSON), weil EVCCs Prüfung mit einem leeren Wert scheitert.
 - Kein Schlüssel `SupportedFeatureProfiles`; `ChangeConfiguration WebSocketPingInterval` beantwortet die Box mit leerer Antwort. Beides ist unkritisch.
 - `AuthorizeRemoteTxRequests=false`: Ein Remote Start braucht kein vorheriges `Authorize`.
 
@@ -94,7 +94,8 @@ Phasenumschaltung: Den auskommentierten Block `tos: true` / `phases1p3p` aktivie
 | `OCPP_PASSWORD` | leer | Basic-Auth-Passwort für die Wallbox |
 | `API_TOKEN` | leer | Bearer-Token für `/api/*` (Statusseite dann mit `?token=…` öffnen) |
 | `CONNECTOR_ID` | `1` | Ladepunkt-Nummer an der Wallbox |
-| `METER_INTERVAL` | `10` | Sekunden zwischen Messwerten |
+| `METER_INTERVAL` | `10` | Sekunden zwischen Messwerten während des Ladens |
+| `METER_ALIGNED_INTERVAL` | `60` | Sekunden zwischen uhr-synchronen Messwerten, auch ohne Ladevorgang; `0` = nicht ändern |
 | `METER_MEASURANDS` | Energie, Leistung, Strom, Spannung | angeforderte Messgrößen |
 | `STACK_LEVEL` / `PROFILE_ID` | `0` / `1` | Ladeprofil-Details, bei Bedarf anpassen |
 | `LOG_LEVEL` | `INFO` | `DEBUG` für mehr Details |
@@ -125,7 +126,7 @@ pytest -v tests/
 
 `tests/sim_wallbox.py` simuliert eine Solax-ähnliche Wallbox mit Steuer-API (einstecken, abstecken, RFID). Mit `SOLAX_QUIRKS=1` verhält sie sich wie die echte X3-HAC mit Firmware 012.04 (siehe oben). Die Tests decken ab: Einrichtung, Remote Start beim Einstecken, Freigabe/Pause/Stromänderung, Phasenumschaltung, wallbox-seitiges Plug & Charge, RFID-Allowlist, Fallback ohne Ladeprofile, Neustart der Bridge mitten im Laden, Watt-Profile der Solax inklusive einphasig ladendem Auto, Verbindung ohne ID im Pfad, noch nie verbundene Wallbox, OCPP-Passwort und API-Token.
 
-`tests/test_evcc_integration.py` startet zusätzlich ein **echtes EVCC** mit dem Charger-Block aus `evcc-charger.yaml` und einem simulierten Hausnetz. Geprüft werden Sofortladen, PV-Überschussregelung, Umschaltung von 3 auf 1 Phase, Pause und Abstecken. Lokal mit `EVCC_BIN=/pfad/zu/evcc pytest tests/test_evcc_integration.py`. Die GitHub-Action lädt dafür bei jedem Lauf die neueste EVCC-Version und läuft zusätzlich jeden Montag, damit neue EVCC-Versionen automatisch geprüft werden.
+`tests/test_evcc_integration.py` startet zusätzlich ein **echtes EVCC** mit dem Charger-Block aus `evcc-charger.yaml` und einem simulierten Hausnetz. Geprüft werden Sofortladen, PV-Überschussregelung, Umschaltung von 3 auf 1 Phase bei wenig PV (unter 3 × 6 A ≈ 4,1 kW), Pause und Abstecken – einmal mit Ladeprofilen in Ampere und einmal mit den Watt-Profilen der Solax. Lokal mit `EVCC_BIN=/pfad/zu/evcc pytest tests/test_evcc_integration.py`. Die GitHub-Action lädt dafür bei jedem Lauf die neueste EVCC-Version und läuft zusätzlich jeden Montag, damit neue EVCC-Versionen automatisch geprüft werden.
 
 ## Bekannte Grenzen
 

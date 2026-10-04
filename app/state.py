@@ -93,7 +93,9 @@ class ChargerState:
         d["status"] = self.evcc_status()
         d["enabled"] = self.evcc_enabled()
         d["power"] = round(self.power_w, 1)
-        d["energy"] = self.energy_kwh  # null, solange die Wallbox noch keinen Zählerstand geschickt hat
+        # EVCC kann mit null nicht umgehen; bis zum ersten Zählerstand 0 melden
+        d["energy"] = self.energy_kwh if self.energy_kwh is not None else 0.0
+        d["energy_known"] = self.energy_kwh is not None
         d["session_energy"] = self.session_kwh()
         d["idtag"] = self.id_tag or self.last_id_tag
         d["charging"] = self.ocpp_status == "Charging"
