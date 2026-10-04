@@ -116,7 +116,10 @@ class Store:
         self.next_tx_id = int(time.time()) % 1_000_000  # eindeutig auch ohne Persistenz
         self.events: deque = deque(maxlen=200)
         self._lock = threading.Lock()
-        os.makedirs(data_dir, exist_ok=True)
+        try:
+            os.makedirs(data_dir, exist_ok=True)
+        except OSError as e:
+            log.warning("Datenverzeichnis %s nicht anlegbar: %s", data_dir, e)
         self._load()
 
     def _load(self):
@@ -147,17 +150,19 @@ class Store:
                 },
             }
             d = os.path.dirname(self.path)
-            fd, tmp = tempfile.mkstemp(dir=d, prefix=".state")
+            tmp = None
             try:
+                fd, tmp = tempfile.mkstemp(dir=d, prefix=".state")
                 with os.fdopen(fd, "w") as f:
                     json.dump(data, f, indent=2)
                 os.replace(tmp, self.path)
             except Exception as e:
-                log.warning("state.json nicht schreibbar: %s", e)
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
+                log.warning("state.json nicht schreibbar (%s) – Rechte von %s prüfen", e, d)
+                if tmp:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
 
     def get(self, cp_id: str) -> ChargerState:
         st = self.chargers.get(cp_id)
