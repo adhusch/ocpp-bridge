@@ -1,6 +1,6 @@
 # ocpp-bridge
 
-Schlanker OCPP-1.6J-Server, der eine Wallbox (getestet gegen eine Solax-X3-HAC-artige Simulation) für **EVCC** steuerbar macht – ohne EVCCs lizenzpflichtigen `ocpp`-Charger.
+Schlanker OCPP-1.6J-Server, der eine Wallbox (getestet gegen eine Solax-X3-HAC-artige Simulation) für **EVCC** steuerbar macht – ohne EVCCs lizenzpflichtigen `ocpp`-Charger und mit einfachem Plug&Charge.
 
 ```
 Wallbox ──OCPP 1.6J (WebSocket)──▶ ocpp-bridge ◀──HTTP── EVCC (charger type: custom)
