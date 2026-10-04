@@ -45,6 +45,8 @@ class Config:
     ocpp_password: str = field(default_factory=lambda: os.environ.get("OCPP_PASSWORD", ""))
     # Erlaubte Charge-Point-IDs (leer = alle)
     allowed_chargers: list[str] = field(default_factory=lambda: _list("ALLOWED_CHARGERS"))
+    # ID, falls die Wallbox ohne ID im Pfad verbindet (ws://host:8887/)
+    default_charger_id: str = field(default_factory=lambda: os.environ.get("DEFAULT_CHARGER_ID", "wallbox"))
 
     # Autorisierung / Plug & Charge
     # ID-Tag, mit dem die Bridge per RemoteStartTransaction startet

@@ -63,9 +63,13 @@ class Bridge:
         return pw == self.cfg.ocpp_password
 
     async def ocpp_handler(self, request: web.Request) -> web.StreamResponse:
+        log.info("OCPP-Verbindungsversuch von %s auf Pfad %s (Subprotokoll: %s, Auth: %s)",
+                 request.remote, request.path, request.headers.get("Sec-WebSocket-Protocol", "–"),
+                 "ja" if request.headers.get("Authorization") else "nein")
         cp_id = request.path.rstrip("/").rsplit("/", 1)[-1]
-        if not cp_id:
-            return web.Response(status=400, text="Charge-Point-ID fehlt im Pfad (ws://host:port/<ID>)")
+        if not cp_id or cp_id.lower() in ("ocpp", "ocpp16", "ocpp1.6", "ws"):
+            cp_id = self.cfg.default_charger_id
+            log.info("Keine Charge-Point-ID im Pfad – verwende '%s'", cp_id)
         if self.cfg.allowed_chargers and cp_id not in self.cfg.allowed_chargers:
             log.warning("Unbekannte Wallbox %s abgewiesen", cp_id)
             return web.Response(status=404, text="unknown charge point")
@@ -261,6 +265,7 @@ class Bridge:
             return await self.ocpp_handler(request)
         if request.path in ("/", "/index.html"):
             return await self.index(request)
+        log.info("Unbekannte Anfrage %s %s von %s", request.method, request.path, request.remote)
         raise web.HTTPNotFound()
 
     @web.middleware

@@ -253,6 +253,13 @@ def test_ocpp_basic_auth(tmp_path):
         env.close()
 
 
+def test_connect_without_id_in_path(tmp_path):
+    # manche Wallboxen verbinden auf ws://host:8887/ ohne eigene ID
+    with running(tmp_path, sim_env={"CP_ID": ""}) as e:
+        assert e.state("wallbox")["connected"]
+        assert "OCPP-Verbindungsversuch" in (tmp_path / "bridge.log").read_text()
+
+
 def test_api_token(tmp_path):
     env = Env(tmp_path, {"API_TOKEN": "t0k"}, {})
     try:
