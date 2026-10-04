@@ -103,8 +103,10 @@ pytest -v tests/
 
 `tests/sim_wallbox.py` simuliert eine Solax-ähnliche Wallbox mit Steuer-API (einstecken, abstecken, RFID). Die Tests decken ab: Einrichtung, Remote Start beim Einstecken, Freigabe/Pause/Stromänderung, Phasenumschaltung, wallbox-seitiges Plug & Charge, RFID-Allowlist, Fallback ohne Ladeprofile, Neustart der Bridge mitten im Laden, OCPP-Passwort und API-Token.
 
+`tests/test_evcc_integration.py` startet zusätzlich ein **echtes EVCC** mit dem Charger-Block aus `evcc-charger.yaml` und einem simulierten Hausnetz. Geprüft werden Sofortladen, PV-Überschussregelung, Umschaltung von 3 auf 1 Phase, Pause und Abstecken. Lokal mit `EVCC_BIN=/pfad/zu/evcc pytest tests/test_evcc_integration.py`. Die GitHub-Action lädt dafür bei jedem Lauf die neueste EVCC-Version und läuft zusätzlich jeden Montag, damit neue EVCC-Versionen automatisch geprüft werden.
+
 ## Bekannte Grenzen
 
 - **ISO-15118-Plug-&-Charge mit Zertifikaten** (OCPP 1.6 Security/PnC-Erweiterung) ist nicht implementiert. „Plug & Charge“ heißt hier: automatischer Start beim Einstecken bzw. Fahrzeug-/Wallbox-Tag akzeptieren.
 - Eine Wallbox mit **einem Ladepunkt** pro Charge-Point-ID (`CONNECTOR_ID`).
-- Getestet gegen die Simulation und echtes EVCC 0.316.2, **nicht gegen echte Solax-Hardware**. In Foren wird berichtet, dass das OCPP mancher Solax-Firmwares wackelig ist. Bei Problemen `LOG_OCPP=true` setzen und das Log ansehen.
+- Getestet gegen die Simulation und echtes EVCC (automatisch gegen die jeweils neueste Version), **nicht gegen echte Solax-Hardware**. In Foren wird berichtet, dass das OCPP mancher Solax-Firmwares wackelig ist. Bei Problemen `LOG_OCPP=true` setzen und das Log ansehen.

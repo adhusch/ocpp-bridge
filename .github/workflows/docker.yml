@@ -6,6 +6,9 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+  # wöchentlich: gegen neue EVCC-Versionen testen und Basis-Image auffrischen
+  schedule:
+    - cron: "17 4 * * 1"
 
 permissions:
   contents: read
@@ -29,10 +32,33 @@ jobs:
           cache: pip
           cache-dependency-path: requirements*.txt
       - run: pip install -r requirements-dev.txt
-      - run: pytest -v tests/
+      - run: pytest -v tests/test_e2e.py
+
+  evcc:
+    name: Integration mit neuester EVCC-Version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Neueste EVCC-Version laden
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=$(gh release view -R evcc-io/evcc --json tagName -q .tagName)
+          echo "EVCC $TAG"
+          gh release download "$TAG" -R evcc-io/evcc -p "evcc_${TAG}_linux-amd64.tar.gz" -O evcc.tgz
+          mkdir -p "$RUNNER_TEMP/evcc" && tar xzf evcc.tgz -C "$RUNNER_TEMP/evcc"
+          echo "EVCC_BIN=$RUNNER_TEMP/evcc/evcc" >> "$GITHUB_ENV"
+          echo "### Getestet mit EVCC $TAG" >> "$GITHUB_STEP_SUMMARY"
+      - run: pytest -v -s tests/test_evcc_integration.py
 
   docker:
-    needs: test
+    needs: [test, evcc]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
