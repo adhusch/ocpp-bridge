@@ -63,6 +63,10 @@ class Config:
     # Ladeprofil-Feinheiten (wie in EVCC)
     profile_id: int = field(default_factory=lambda: _int("PROFILE_ID", 1))
     stack_level: int = field(default_factory=lambda: _int("STACK_LEVEL", 0))
+    # Einheit der Ladeprofile: "auto" (aus GetConfiguration), "A" oder "W"
+    rate_unit: str = field(default_factory=lambda: os.environ.get("RATE_UNIT", "auto").strip())
+    # Netzspannung für die Umrechnung A → W
+    voltage: float = field(default_factory=lambda: float(os.environ.get("VOLTAGE", "230")))
     # Standard-Ladestrom, bis EVCC einen Wert vorgibt
     default_current: float = field(default_factory=lambda: float(os.environ.get("DEFAULT_CURRENT", "6")))
 

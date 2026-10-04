@@ -1,6 +1,6 @@
 # ocpp-bridge
 
-Schlanker OCPP-1.6J-Server, der eine Wallbox (getestet gegen eine Solax-X3-HAC-artige Simulation) für **EVCC** steuerbar macht – ohne EVCCs lizenzpflichtigen `ocpp`-Charger und mit einfachem Plug&Charge.
+Schlanker OCPP-1.6J-Server, der eine Wallbox (Verbindung und Einrichtung mit einer echten Solax X3-HAC geprüft, Ladeabläufe gegen eine Solax-artige Simulation getestet) für **EVCC** steuerbar macht – ohne EVCCs lizenzpflichtigen `ocpp`-Charger und mit einfachem Plug&Charge.
 
 ```
 Wallbox ──OCPP 1.6J (WebSocket)──▶ ocpp-bridge ◀──HTTP── EVCC (charger type: custom)
@@ -52,6 +52,25 @@ In der SolaX-App: Wallbox → Feineinstellung → Erweiterte Einstellungen → O
 - **Charge Point ID**: frei wählbar, z. B. die Seriennummer. Die ID wird an die URL angehängt (`ws://…:8887/<ID>`).
 - Arbeitsmodus **„Fast/Schnell“**, nicht an den Solax-Wechselrichter gekoppelt (sonst regeln zwei Systeme gleichzeitig). Für 1/3-Phasen-Umschaltung braucht es laut EVCC-Doku Firmware ≥ V9.05.
 
+### Erfahrungen mit echter Hardware
+
+Stand 04.10.2026, **Solax X3-HAC** (Modell `SPACS000001`, Firmware `012.04`), Bridge im Docker-Stack neben EVCC 0.316.2.
+
+**Geprüft und funktionsfähig**
+- Die Wallbox verbindet sich mit `ws://<host>:8887/<Seriennummer>`, Subprotokoll `ocpp1.6`, ohne Passwort.
+- `BootNotification`, `StatusNotification` und `Heartbeat` (alle 60 s) laufen stabil.
+- Die Einrichtung nach dem Verbinden läuft durch: `GetConfiguration`, `MeterValueSampleInterval=10` wird akzeptiert, `SetChargingProfile` (TxDefaultProfile) wird akzeptiert.
+- EVCC erreicht die Bridge im Stack über `http://ocpp-bridge:8887`.
+
+**Eigenheiten der Solax, die die Bridge berücksichtigt**
+- Die Box meldet ihre Ladeprofil-Einheit unter dem falsch geschriebenen Schlüssel `ChargingSchduleAllowedChargingRate` mit dem Wert `Power`. Die Bridge erkennt das und schickt Ladeprofile in **Watt** (Strom × 230 V × Phasen). Lädt das Auto mit weniger Phasen als angenommen, rechnet sie das Limit anhand der gemessenen Ströme nach. Mit `RATE_UNIT=A` lässt sich das übersteuern.
+- `MeterValuesSampledData` ist schreibgeschützt. Die Box liefert fest Strom, Spannung, Energie, Frequenz, Leistung und Leistungsfaktor, was für EVCC reicht.
+- `TriggerMessage MeterValues` wird abgelehnt. Bis zur ersten Messung (spätestens beim Laden) meldet die Bridge den Zählerstand deshalb als unbekannt statt 0.
+- Kein Schlüssel `SupportedFeatureProfiles`; `ChangeConfiguration WebSocketPingInterval` beantwortet die Box mit leerer Antwort. Beides ist unkritisch.
+- `AuthorizeRemoteTxRequests=false`: Ein Remote Start braucht kein vorheriges `Authorize`.
+
+**Noch nicht mit Auto geprüft:** Remote Start beim Einstecken, ob die Box das Watt-Limit tatsächlich einhält, Pause per 0 W und Phasenumschaltung. Diese Abläufe sind bisher nur in der Simulation mit nachgebildeten Solax-Eigenheiten getestet (`SOLAX_QUIRKS=1`).
+
 ## EVCC einrichten
 
 Den Inhalt von `evcc-charger.yaml` in die `evcc.yaml` übernehmen und `192.168.1.10` durch die IP des Docker-Hosts ersetzen. Läuft EVCC im selben Docker-Netz, geht auch `http://ocpp-bridge:8887`. Danach EVCC neu starten.
@@ -69,6 +88,9 @@ Phasenumschaltung: Den auskommentierten Block `tos: true` / `phases1p3p` aktivie
 | `ID_TAG` | `evcc` | ID-Tag für Remote Start |
 | `ALLOWED_ID_TAGS` | leer | erlaubte RFID-/Plug&Charge-Tags, kommagetrennt; leer = alle |
 | `ALLOWED_CHARGERS` | leer | erlaubte Charge-Point-IDs; leer = alle |
+| `DEFAULT_CHARGER_ID` | `wallbox` | ID, wenn die Wallbox ohne ID im Pfad verbindet (`ws://host:8887/`) |
+| `RATE_UNIT` | `auto` | Einheit der Ladeprofile: `auto` (wie von der Wallbox gemeldet), `A` oder `W` |
+| `VOLTAGE` | `230` | Spannung für die Umrechnung von A in W |
 | `OCPP_PASSWORD` | leer | Basic-Auth-Passwort für die Wallbox |
 | `API_TOKEN` | leer | Bearer-Token für `/api/*` (Statusseite dann mit `?token=…` öffnen) |
 | `CONNECTOR_ID` | `1` | Ladepunkt-Nummer an der Wallbox |
@@ -101,7 +123,7 @@ pip install -r requirements-dev.txt
 pytest -v tests/
 ```
 
-`tests/sim_wallbox.py` simuliert eine Solax-ähnliche Wallbox mit Steuer-API (einstecken, abstecken, RFID). Die Tests decken ab: Einrichtung, Remote Start beim Einstecken, Freigabe/Pause/Stromänderung, Phasenumschaltung, wallbox-seitiges Plug & Charge, RFID-Allowlist, Fallback ohne Ladeprofile, Neustart der Bridge mitten im Laden, OCPP-Passwort und API-Token.
+`tests/sim_wallbox.py` simuliert eine Solax-ähnliche Wallbox mit Steuer-API (einstecken, abstecken, RFID). Mit `SOLAX_QUIRKS=1` verhält sie sich wie die echte X3-HAC mit Firmware 012.04 (siehe oben). Die Tests decken ab: Einrichtung, Remote Start beim Einstecken, Freigabe/Pause/Stromänderung, Phasenumschaltung, wallbox-seitiges Plug & Charge, RFID-Allowlist, Fallback ohne Ladeprofile, Neustart der Bridge mitten im Laden, Watt-Profile der Solax inklusive einphasig ladendem Auto, Verbindung ohne ID im Pfad, noch nie verbundene Wallbox, OCPP-Passwort und API-Token.
 
 `tests/test_evcc_integration.py` startet zusätzlich ein **echtes EVCC** mit dem Charger-Block aus `evcc-charger.yaml` und einem simulierten Hausnetz. Geprüft werden Sofortladen, PV-Überschussregelung, Umschaltung von 3 auf 1 Phase, Pause und Abstecken. Lokal mit `EVCC_BIN=/pfad/zu/evcc pytest tests/test_evcc_integration.py`. Die GitHub-Action lädt dafür bei jedem Lauf die neueste EVCC-Version und läuft zusätzlich jeden Montag, damit neue EVCC-Versionen automatisch geprüft werden.
 
@@ -109,4 +131,4 @@ pytest -v tests/
 
 - **ISO-15118-Plug-&-Charge mit Zertifikaten** (OCPP 1.6 Security/PnC-Erweiterung) ist nicht implementiert. „Plug & Charge“ heißt hier: automatischer Start beim Einstecken bzw. Fahrzeug-/Wallbox-Tag akzeptieren.
 - Eine Wallbox mit **einem Ladepunkt** pro Charge-Point-ID (`CONNECTOR_ID`).
-- Getestet gegen die Simulation und echtes EVCC (automatisch gegen die jeweils neueste Version), **nicht gegen echte Solax-Hardware**. In Foren wird berichtet, dass das OCPP mancher Solax-Firmwares wackelig ist. Bei Problemen `LOG_OCPP=true` setzen und das Log ansehen.
+- Gegen echte Solax-Hardware bisher nur Verbindung und Einrichtung geprüft (siehe „Erfahrungen mit echter Hardware“), die Ladeabläufe gegen die Simulation und echtes EVCC (automatisch gegen die jeweils neueste Version). Bei Problemen `LOG_OCPP=true` setzen und das Log ansehen.

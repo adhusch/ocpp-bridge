@@ -39,6 +39,10 @@ LOCAL_PNC = os.environ.get("LOCAL_PNC", "0") == "1"
 PNC_TAG = os.environ.get("PNC_TAG", "PNC-VEHICLE")
 REJECT_PROFILES = os.environ.get("REJECT_PROFILES", "0") == "1"
 CAR_MAX_A = float(os.environ.get("CAR_MAX_A", "16"))
+CAR_PHASES = int(os.environ.get("CAR_PHASES", "3"))
+# Verhalten der echten Solax X3-HAC (FW 012.04) nachbilden: Ladeprofile in Watt,
+# Schlüssel mit Tippfehler, MeterValuesSampledData readonly, TriggerMessage MeterValues abgelehnt
+SOLAX_QUIRKS = os.environ.get("SOLAX_QUIRKS", "0") == "1"
 METER_EVERY = float(os.environ.get("METER_EVERY", "2"))
 CTRL_PORT = int(os.environ.get("CTRL_PORT", "9999"))
 
@@ -54,7 +58,7 @@ class Sim(CP):
         self.status = "Available"
         self.tx_id = None
         self.limit_a = 32.0            # ohne Profil: volle Leistung
-        self.phases = 3
+        self.phases = CAR_PHASES
         self.energy_wh = 123_456.0
         self.power_w = 0.0
         self.config = {
@@ -64,6 +68,18 @@ class Sim(CP):
             "ChargingScheduleAllowedChargingRateUnit": "Current",
             "NumberOfConnectors": "1",
         }
+        if SOLAX_QUIRKS:
+            self.config = {
+                "AuthorizeRemoteTxRequests": "false",
+                "MeterValuesSampledData": "Current.Import,Voltage,Energy.Active.Import.Register,Frequency,Power.Active.Import,Power.Factor",
+                "MeterValueSampleInterval": "60",
+                "NumberOfConnectors": "1",
+                "ChargeProfileMaxStackLevel": "2",
+                "ChargingSchduleAllowedChargingRate": "Power",
+                "MaxChargingProfilesInstalled": "1",
+                "StopTransactionOnEVSideDisconnect": "true",
+            }
+        self.limit_w = None
         self.received = []  # Protokoll für Tests
 
     # ---------------------------------------------------- Zustand
@@ -73,7 +89,10 @@ class Sim(CP):
             await self.call(call.StatusNotification(connector_id=1, error_code="NoError", status=s, timestamp=now()))
 
     def eff_current(self):
-        return max(0.0, min(self.limit_a, CAR_MAX_A))
+        limit = self.limit_a
+        if self.limit_w is not None:  # Watt-Profil: Strom ergibt sich aus tatsächlicher Phasenzahl
+            limit = self.limit_w / (230.0 * self.phases)
+        return max(0.0, min(limit, CAR_MAX_A))
 
     async def update_charging(self):
         if self.tx_id is None:
@@ -109,17 +128,22 @@ class Sim(CP):
     def get_config(self, **kw):
         self.received.append("GetConfiguration")
         return call_result.GetConfiguration(configuration_key=[
-            {"key": k, "readonly": False, "value": v} for k, v in self.config.items()])
+            {"key": k, "readonly": SOLAX_QUIRKS and k in ("MeterValuesSampledData", "NumberOfConnectors"), "value": v}
+            for k, v in self.config.items()])
 
     @on("ChangeConfiguration")
     def change_config(self, key, value):
         self.received.append(f"ChangeConfiguration {key}={value}")
+        if SOLAX_QUIRKS and key == "MeterValuesSampledData":
+            return call_result.ChangeConfiguration(status="Rejected")
         self.config[key] = value
         return call_result.ChangeConfiguration(status="Accepted")
 
     @on("TriggerMessage")
     def trigger(self, requested_message, **kw):
         self.received.append(f"TriggerMessage {requested_message}")
+        if SOLAX_QUIRKS and requested_message == "MeterValues":
+            return call_result.TriggerMessage(status="Rejected")
         async def later():
             await asyncio.sleep(0.2)
             if requested_message == "StatusNotification":
@@ -132,11 +156,16 @@ class Sim(CP):
     @on("SetChargingProfile")
     def set_profile(self, connector_id, cs_charging_profiles):
         p = cs_charging_profiles
-        period = p["charging_schedule"]["charging_schedule_period"][0]
-        self.received.append(f"SetChargingProfile {p['charging_profile_purpose']} {period['limit']} {period.get('number_phases')}")
+        sched = p["charging_schedule"]
+        period = sched["charging_schedule_period"][0]
+        self.received.append(f"SetChargingProfile {p['charging_profile_purpose']} {period['limit']} {period.get('number_phases')} {sched['charging_rate_unit']}")
         if REJECT_PROFILES:
             return call_result.SetChargingProfile(status="Rejected")
-        self.limit_a = float(period["limit"])
+        if sched["charging_rate_unit"] == "W":
+            self.limit_w = float(period["limit"])
+        else:
+            self.limit_w = None
+            self.limit_a = float(period["limit"])
         if period.get("number_phases"):
             self.phases = int(period["number_phases"])
         asyncio.create_task(self.update_charging())
@@ -228,7 +257,8 @@ async def ctrl_app():
 
     async def state(r):
         return web.json_response({k: getattr(SIM, k) for k in
-                                  ("plugged", "status", "tx_id", "limit_a", "phases", "energy_wh", "power_w", "received")})
+                                  ("plugged", "status", "tx_id", "limit_a", "limit_w", "phases", "energy_wh", "power_w", "received")}
+                                 | {"current_a": SIM.eff_current()})
 
     app = web.Application()
     app.router.add_post("/plug", plug)
@@ -272,7 +302,7 @@ async def main():
                     for t in loops:
                         t.cancel()
                     state = {k: v for k, v in sim.__dict__.items()
-                             if k in ("plugged", "status", "tx_id", "limit_a", "phases", "energy_wh", "power_w", "config", "received")}
+                             if k in ("plugged", "status", "tx_id", "limit_a", "limit_w", "phases", "energy_wh", "power_w", "config", "received")}
         except (OSError, websockets.exceptions.WebSocketException) as e:
             log.info("Verbindung weg (%s), neuer Versuch in 2 s", e)
             await asyncio.sleep(2)

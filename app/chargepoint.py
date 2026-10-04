@@ -36,18 +36,23 @@ class ChargePoint(OcppChargePoint):
         self.cfg = cfg
         self.store = store
         self.st: ChargerState = store.get(cp_id)
-        self.rate_unit = "A"           # "A" oder "W", aus GetConfiguration
+        self.rate_unit = cfg.rate_unit.upper() if cfg.rate_unit.upper() in ("A", "W") else "A"
         self.supports_trigger = True
         self._setup_task: Optional[asyncio.Task] = None
         self._setup_done = False
         self._last_remote_start = 0.0
+        self._last_w_phases = 0
         self._tasks: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------ helpers
     def _spawn(self, coro, delay: float = 0.0):
         async def runner():
-            if delay:
-                await asyncio.sleep(delay)
+            try:
+                if delay:
+                    await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                coro.close()  # nie gestartete Coroutine sauber verwerfen
+                raise
             try:
                 await coro
             except asyncio.CancelledError:
@@ -210,6 +215,13 @@ class ChargePoint(OcppChargePoint):
         for mv in meter_value or []:
             self._parse_sampled(mv.get("sampled_value") or [], connector0=(cid == 0))
         self.st.meter_ts = time.time()
+        # Watt-Profile: wenn das Auto mit anderer Phasenzahl lädt als angenommen, Limit neu rechnen
+        if (self.rate_unit == "W" and self.st.desired_enabled and cid == self.cfg.connector_id
+                and self.st.ocpp_status == "Charging"
+                and self._last_w_phases and self._active_phases() != self._last_w_phases):
+            self._event(f"Auto lädt {self._active_phases()}-phasig – Watt-Limit wird angepasst")
+            self._last_w_phases = self._active_phases()
+            self._spawn(self.set_current(self.st.max_current))
         return call_result.MeterValues()
 
     def _parse_sampled(self, samples: list, connector0: bool):
@@ -300,11 +312,19 @@ class ChargePoint(OcppChargePoint):
                 self.supports_trigger = "remotetrigger" in features.lower()
                 if "smartcharging" not in features.lower():
                     self._event("Warnung: Wallbox meldet kein SmartCharging-Profil")
-            unit = (keys.get("chargingscheduleallowedchargingrateunit") or {}).get("value") or ""
+            # Standard-Schlüssel ChargingScheduleAllowedChargingRateUnit; Solax schreibt
+            # "ChargingSchduleAllowedChargingRate" (sic!) – daher tolerant suchen
+            unit = next((v.get("value") or "" for k, v in keys.items()
+                         if "allowedchargingrate" in k), "")
             u = unit.lower()
-            if u and "current" not in u and u != "a" and ("power" in u or u == "w"):
-                self.rate_unit = "W"
-                self._event("Wallbox akzeptiert Ladeprofile nur in Watt")
+            if self.cfg.rate_unit.lower() == "auto":
+                if u and "current" not in u and u != "a" and ("power" in u or u == "w"):
+                    self.rate_unit = "W"
+                    self._event(f"Wallbox meldet Ladeprofil-Einheit '{unit}' → Ladeprofile in Watt")
+                else:
+                    self.rate_unit = "A"
+            else:
+                self._event(f"Ladeprofil-Einheit fest auf {self.rate_unit} (RATE_UNIT)")
             sampled_ro = bool((keys.get("metervaluessampleddata") or {}).get("readonly"))
         except Exception as e:
             self._event(f"GetConfiguration fehlgeschlagen: {e!r}")
@@ -371,14 +391,24 @@ class ChargePoint(OcppChargePoint):
         self._event(f"RemoteStopTransaction #{self.st.transaction_id} ({reason}): {status}")
         return status
 
+    def _active_phases(self) -> int:
+        """Phasen für die A→W-Umrechnung: Vorgabe von EVCC, sonst gemessen, sonst 3."""
+        if self.st.phases:
+            return self.st.phases
+        if self.st.ocpp_status == "Charging":
+            n = sum(1 for c in self.st.currents if (c or 0) > 1.0)
+            if n in (1, 2):
+                return n
+        return 3
+
     def _profile(self, current: float) -> dict:
         phases = self.st.phases or None
         if self.rate_unit == "W":
-            limit = float(int(230.0 * current * (phases or 3)))
+            limit = float(int(self.cfg.voltage * current * self._active_phases()))
         else:
             limit = float(int(current * 10) / 10)
         period = {"start_period": 0, "limit": limit}
-        if phases and self.rate_unit == "A":
+        if phases:
             period["number_phases"] = phases
         return {
             "charging_profile_id": self.cfg.profile_id,
@@ -401,7 +431,10 @@ class ChargePoint(OcppChargePoint):
             status = f"Fehler {e!r}"
         self.st.profile_supported = status == "Accepted"
         self.st.last_profile_status = status
-        self._event(f"Ladeprofil {current:g} A" + (f"/{self.st.phases}p" if self.st.phases else "") + f": {status}")
+        unit_txt = f" (= {self._profile(current)['charging_schedule']['charging_schedule_period'][0]['limit']:g} W bei {self._active_phases()}p)" \
+            if self.rate_unit == "W" else ""
+        self._last_w_phases = self._active_phases()
+        self._event(f"Ladeprofil {current:g} A" + (f"/{self.st.phases}p" if self.st.phases else "") + unit_txt + f": {status}")
         return status
 
     async def apply(self) -> str:
