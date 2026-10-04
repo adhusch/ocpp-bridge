@@ -260,6 +260,19 @@ def test_connect_without_id_in_path(tmp_path):
         assert "OCPP-Verbindungsversuch" in (tmp_path / "bridge.log").read_text()
 
 
+def test_unknown_charger_reports_offline(tmp_path):
+    # EVCC fragt eine Wallbox ab, die sich noch nie verbunden hat → offline statt 404
+    env = Env(tmp_path, {}, {})
+    try:
+        env.start_bridge()
+        st = env.state("5030B002112D0P")
+        assert st["status"] == "A" and st["connected"] is False and st["enabled"] is False
+        assert st["power"] == 0 and st["energy"] == 0
+        assert http("POST", env.api("/api/5030B002112D0P/maxcurrent"), "10")["result"] == "stored"
+    finally:
+        env.close()
+
+
 def test_api_token(tmp_path):
     env = Env(tmp_path, {"API_TOKEN": "t0k"}, {})
     try:

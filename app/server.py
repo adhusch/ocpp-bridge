@@ -123,7 +123,10 @@ class Bridge:
                 raise web.HTTPNotFound(text="noch keine Wallbox verbunden")
         st = self.store.chargers.get(cp_id)
         if st is None:
-            raise web.HTTPNotFound(text=f"Wallbox {cp_id} unbekannt")
+            # Noch nie verbunden: als "offline, kein Fahrzeug" melden statt 404,
+            # damit EVCC nicht mit einem Fehler startet, solange die Wallbox fehlt.
+            log.info("API-Zugriff auf noch unbekannte Wallbox %s – melde offline", cp_id)
+            st = self.store.get(cp_id)
         return cp_id, st, self.active.get(cp_id)
 
     @staticmethod

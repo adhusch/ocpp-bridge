@@ -93,7 +93,7 @@ class ChargerState:
         d["status"] = self.evcc_status()
         d["enabled"] = self.evcc_enabled()
         d["power"] = round(self.power_w, 1)
-        d["energy"] = self.energy_kwh
+        d["energy"] = self.energy_kwh if self.energy_kwh is not None else 0.0
         d["session_energy"] = self.session_kwh()
         d["idtag"] = self.id_tag or self.last_id_tag
         d["charging"] = self.ocpp_status == "Charging"
