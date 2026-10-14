@@ -135,7 +135,7 @@ def test_with_real_evcc(tmp_path, scenario):
         # 2) Sofortladen → 16 A, 3-phasig
         set_mode("now")
         wait_for(lambda: (l := lp())["charging"] and l["chargePower"] > 10000, timeout=60, msg="Sofortladen 16 A")
-        assert env.simstate()["current_a"] == 16.0
+        assert env.simstate()["current_a"] >= 15.9  # Solax: auf 11000 W gekappt = 15,9 A
         assert lp()["vehicleIdentity"] == "evcc"
 
         # 3) PV-Überschuss ~6 kW → Strom wird heruntergeregelt

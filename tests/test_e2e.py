@@ -352,6 +352,22 @@ def test_all_profiles_ignored_pause_stops_transaction(tmp_path):
         wait_for(lambda: e.state()["status"] == "C", msg="neu gestartet")
 
 
+def test_solax_rejects_above_rated_power(tmp_path):
+    # Realer Fall 14.10.: 16 A = 11040 W wird von der 11-kW-Solax abgelehnt → Auto lud gar nicht
+    with running(tmp_path, sim_env={"SOLAX_QUIRKS": "1"}) as e:
+        http("POST", e.api("/api/_/maxcurrent"), "16")
+        http("POST", e.api("/api/_/enable"), "true")
+        e.simctl("plug")
+        st = wait_for(lambda: (s := e.state())["status"] == "C" and s["currents"][0] > 15 and s,
+                      msg="lädt mit gekapptem Limit")
+        assert st["max_power_w"] == 11000 and e.simstate()["limit_w"] == 11000.0
+        assert any("akzeptiert 11000 W" in t for t in e.events())
+        # gemerkt: nächste Änderung geht direkt mit Kappung durch
+        http("POST", e.api("/api/_/maxcurrent"), "15")
+        http("POST", e.api("/api/_/maxcurrent"), "16")
+        assert sum("abgelehnt: 11040" in r for r in e.simstate()["received"]) == 1
+
+
 def test_unknown_charger_reports_offline(tmp_path):
     # EVCC fragt eine Wallbox ab, die sich noch nie verbunden hat → offline statt 404
     env = Env(tmp_path, {}, {})

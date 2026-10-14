@@ -44,6 +44,8 @@ PNC_TAG = os.environ.get("PNC_TAG", "PNC-VEHICLE")
 REJECT_PROFILES = os.environ.get("REJECT_PROFILES", "0") == "1"
 HONOR_PROFILES = os.environ.get("HONOR_PROFILES", "*").strip()
 MIN_STACK = int(os.environ.get("MIN_STACK", "0"))
+# Watt-Limits über der Nennleistung ablehnen (echte Solax X3-HAC-11: 11040 W → Rejected)
+MAX_POWER_W = float(os.environ.get("MAX_POWER_W", "11000" if os.environ.get("SOLAX_QUIRKS", "0") == "1" else "0"))
 CAR_MAX_A = float(os.environ.get("CAR_MAX_A", "16"))
 CAR_PHASES = int(os.environ.get("CAR_PHASES", "3"))
 # Verhalten der echten Solax X3-HAC (FW 012.04) nachbilden: Ladeprofile in Watt,
@@ -167,6 +169,9 @@ class Sim(CP):
         period = sched["charging_schedule_period"][0]
         self.received.append(f"SetChargingProfile {p['charging_profile_purpose']} {period['limit']} {period.get('number_phases')} {sched['charging_rate_unit']}")
         if REJECT_PROFILES:
+            return call_result.SetChargingProfile(status="Rejected")
+        if sched["charging_rate_unit"] == "W" and MAX_POWER_W and float(period["limit"]) > MAX_POWER_W:
+            self.received.append(f"  abgelehnt: {period['limit']} W > {MAX_POWER_W:g} W")
             return call_result.SetChargingProfile(status="Rejected")
         key = f"{p['charging_profile_purpose']}/{sched['charging_rate_unit']}"
         honored = (HONOR_PROFILES == "*" or key in HONOR_PROFILES.split(",")) and HONOR_PROFILES != "none" \

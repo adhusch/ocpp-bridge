@@ -73,6 +73,8 @@ class ChargerState:
     profile_variant: int = 0
     profile_effective: Optional[bool] = None
     profiles_ignored: bool = False
+    # höchstes Watt-Limit, das die Wallbox akzeptiert (z. B. 11000 bei einer 11-kW-Box)
+    max_power_w: Optional[float] = None
 
     def evcc_status(self) -> str:
         if not self.connected:
@@ -112,7 +114,7 @@ class Store:
     PERSIST_KEYS = (
         "transaction_id", "id_tag", "last_id_tag", "tx_start", "meter_start_wh",
         "desired_enabled", "max_current", "phases", "energy_kwh", "last_session_kwh",
-        "vendor", "model", "firmware", "serial", "profile_variant", "profiles_ignored",
+        "vendor", "model", "firmware", "serial", "profile_variant", "profiles_ignored", "max_power_w",
     )
 
     def __init__(self, data_dir: str, default_current: float):

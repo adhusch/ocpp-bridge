@@ -78,6 +78,8 @@ class Config:
     rate_unit: str = field(default_factory=lambda: os.environ.get("RATE_UNIT", "auto").strip())
     # Netzspannung für die Umrechnung A → W
     voltage: float = field(default_factory=lambda: float(os.environ.get("VOLTAGE", "230")))
+    # Höchstleistung der Wallbox in W für Watt-Profile; leer = automatisch ermitteln
+    max_power: Optional[int] = field(default_factory=lambda: _opt_int("MAX_POWER"))
     # Standard-Ladestrom, bis EVCC einen Wert vorgibt
     default_current: float = field(default_factory=lambda: float(os.environ.get("DEFAULT_CURRENT", "6")))
 

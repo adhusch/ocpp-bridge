@@ -541,6 +541,9 @@ class ChargePoint(OcppChargePoint):
         phases = self.st.phases or None
         if unit == "W":
             limit = float(int(self.cfg.voltage * current * self._active_phases()))
+            cap = self._power_cap()
+            if cap:
+                limit = min(limit, float(cap))
         else:
             limit = float(int(current * 10) / 10)
         period = {"start_period": 0, "limit": limit}
@@ -564,13 +567,43 @@ class ChargePoint(OcppChargePoint):
     def _profile(self, current: float) -> dict:
         return self._variant_call(current)[1]
 
-    async def set_current(self, current: float) -> str:
+    def _power_cap(self) -> Optional[float]:
+        return float(self.cfg.max_power) if self.cfg.max_power else self.st.max_power_w
+
+    # übliche Höchstleistungen von Wallboxen, absteigend; zum Herantasten nach "Rejected"
+    POWER_STEPS = (22000, 11000, 7400, 4600, 3700)
+
+    async def _send_profile(self, current: float) -> tuple[str, int, dict, str]:
         connector, profile, unit = self._variant_call(current)
         try:
             res = await self.call(call.SetChargingProfile(connector_id=connector, cs_charging_profiles=profile))
             status = res.status if res else "Error"
         except Exception as e:
             status = f"Fehler {e!r}"
+        return status, connector, profile, unit
+
+    async def set_current(self, current: float) -> str:
+        status, connector, profile, unit = await self._send_profile(current)
+
+        # Watt-Limit über der Höchstleistung der Wallbox (z. B. 11040 W bei einer 11-kW-Box):
+        # schrittweise kappen und den akzeptierten Wert merken
+        if status == "Rejected" and unit == "W" and current > 0 and not self.cfg.max_power:
+            rejected = profile["charging_schedule"]["charging_schedule_period"][0]["limit"]
+            for cap in (c for c in self.POWER_STEPS if c < rejected):
+                self.st.max_power_w = float(cap)
+                status, connector, profile, unit = await self._send_profile(current)
+                if status == "Accepted":
+                    self._event(f"Wallbox lehnt {rejected:g} W ab, akzeptiert {cap} W → Watt-Limit wird künftig "
+                                f"auf {cap} W begrenzt (fest einstellbar mit MAX_POWER)")
+                    self.store.save()
+                    break
+            else:
+                self.st.max_power_w = None
+        if status == "Rejected" and current > 0 and self.st.desired_enabled:
+            # sonst bliebe ein älteres 0-A-Profil aktiv und das Auto lädt gar nicht
+            self._event(f"Ladeprofil {current:g} A abgelehnt – lösche Ladeprofile, damit nicht bei 0 A hängen bleibt")
+            await self._clear_profiles()
+
         self.st.profile_supported = status == "Accepted"
         self.st.last_profile_status = status
         limit = profile["charging_schedule"]["charging_schedule_period"][0]["limit"]
