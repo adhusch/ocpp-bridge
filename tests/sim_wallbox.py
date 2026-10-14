@@ -12,6 +12,10 @@ Umgebungsvariablen:
   LOCAL_PNC=1       Wallbox startet beim Einstecken selbst (Plug & Charge / Free-Mode)
   PNC_TAG           ID-Tag für lokalen Plug & Charge (Standard: PNC-VEHICLE)
   REJECT_PROFILES=1 SetChargingProfile ablehnen (Wallbox ohne SmartCharging)
+  HONOR_PROFILES    welche Profile wirken: "*" (alle), "none" (alle annehmen, aber ignorieren)
+                    oder Liste "Zweck/Einheit", z. B. "TxProfile/W,ChargePointMaxProfile/A"
+  MIN_STACK=0       Profile unter dieser Stufe werden angenommen, aber ignoriert
+                    (internes Profil der Wallbox auf höherer Stufe)
   CAR_MAX_A=16      maximaler Ladestrom des Autos
   METER_EVERY=2     Sekunden zwischen MeterValues
 """
@@ -38,6 +42,8 @@ PASSWORD = os.environ.get("OCPP_PASSWORD", "")
 LOCAL_PNC = os.environ.get("LOCAL_PNC", "0") == "1"
 PNC_TAG = os.environ.get("PNC_TAG", "PNC-VEHICLE")
 REJECT_PROFILES = os.environ.get("REJECT_PROFILES", "0") == "1"
+HONOR_PROFILES = os.environ.get("HONOR_PROFILES", "*").strip()
+MIN_STACK = int(os.environ.get("MIN_STACK", "0"))
 CAR_MAX_A = float(os.environ.get("CAR_MAX_A", "16"))
 CAR_PHASES = int(os.environ.get("CAR_PHASES", "3"))
 # Verhalten der echten Solax X3-HAC (FW 012.04) nachbilden: Ladeprofile in Watt,
@@ -162,6 +168,12 @@ class Sim(CP):
         self.received.append(f"SetChargingProfile {p['charging_profile_purpose']} {period['limit']} {period.get('number_phases')} {sched['charging_rate_unit']}")
         if REJECT_PROFILES:
             return call_result.SetChargingProfile(status="Rejected")
+        key = f"{p['charging_profile_purpose']}/{sched['charging_rate_unit']}"
+        honored = (HONOR_PROFILES == "*" or key in HONOR_PROFILES.split(",")) and HONOR_PROFILES != "none" \
+            and int(p.get("stack_level", 0)) >= MIN_STACK
+        if not honored:  # wie die echte Solax: "Accepted", aber wirkungslos
+            self.received.append(f"  ignoriert: {key} Stack {p.get('stack_level')}")
+            return call_result.SetChargingProfile(status="Accepted")
         if sched["charging_rate_unit"] == "W":
             self.limit_w = float(period["limit"])
         else:
@@ -171,6 +183,11 @@ class Sim(CP):
             self.phases = int(period["number_phases"])
         asyncio.create_task(self.update_charging())
         return call_result.SetChargingProfile(status="Accepted")
+
+    @on("ClearChargingProfile")
+    def clear_profile(self, **kw):
+        self.received.append(f"ClearChargingProfile {kw}")
+        return call_result.ClearChargingProfile(status="Accepted")
 
     @on("RemoteStartTransaction")
     def remote_start(self, id_tag, **kw):

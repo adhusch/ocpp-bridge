@@ -15,9 +15,9 @@ services:
     environment:
       TZ: Europe/Berlin
       # --- Ladesteuerung ---
-      AUTO_START: "true"        # Plug & Charge: beim Einstecken automatisch RemoteStart
+      AUTO_START: "false"       # true = schon beim Einstecken starten, nicht erst bei EVCC-Freigabe
       DISABLE_MODE: "profile"   # Pause per 0 A-Ladeprofil ("stop" = RemoteStop)
-      STOP_FALLBACK: "true"     # wenn Ladeprofile abgelehnt werden → RemoteStop
+      STOP_FALLBACK: "true"     # wenn Ladeprofile abgelehnt/ignoriert werden → Pause per RemoteStop
       ID_TAG: "evcc"            # Tag für RemoteStartTransaction
       DEFAULT_CURRENT: "6"
       METER_INTERVAL: "10"      # Sekunden zwischen MeterValues

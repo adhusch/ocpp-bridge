@@ -73,7 +73,7 @@ function card(c) {
       <div><div class="k">EVCC-Vorgabe</div><div class="v">${c.desired_enabled ? fmt(c.max_current) + " A" : "Pause"}${c.phases ? " · " + c.phases + "p" : ""}</div></div>
       <div><div class="k">Transaktion</div><div class="v">${c.transaction_id ? "#" + c.transaction_id : "–"}</div></div>
     </div>
-    <p class="meta">ID-Tag: ${esc(c.idtag) || "–"} · Ladeprofil: ${esc(c.last_profile_status) || "–"} · Fehlercode: ${esc(c.error_code)} ${esc(c.status_info)}</p>
+    <p class="meta">ID-Tag: ${esc(c.idtag) || "–"} · Ladeprofil: ${esc(c.last_profile_status) || "–"} (Variante ${c.profile_variant + 1}) · Limit ${c.profiles_ignored ? "<b>wird ignoriert – Pause per Remote Stop</b>" : c.profile_effective === true ? "wird eingehalten" : c.profile_effective === false ? "<b>wird nicht eingehalten</b>" : "noch nicht geprüft"} · Fehlercode: ${esc(c.error_code)} ${esc(c.status_info)}</p>
     <div class="actions">
       <button onclick="act('${esc(c.cp_id)}','start')">Remote Start</button>
       <button onclick="act('${esc(c.cp_id)}','stop')">Remote Stop</button>

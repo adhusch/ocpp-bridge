@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -15,6 +16,11 @@ def _bool(name: str, default: bool) -> bool:
 def _int(name: str, default: int) -> int:
     v = os.environ.get(name)
     return int(v) if v not in (None, "") else default
+
+
+def _opt_int(name: str) -> Optional[int]:
+    v = (os.environ.get(name) or "").strip().lower()
+    return None if v in ("", "auto") else int(v)
 
 
 def _list(name: str) -> list[str]:
@@ -55,22 +61,32 @@ class Config:
     id_tag: str = field(default_factory=lambda: os.environ.get("ID_TAG", "evcc"))
     # Erlaubte RFID-/ID-Tags für lokale Starts (leer = jeder Tag wird akzeptiert)
     allowed_id_tags: list[str] = field(default_factory=lambda: _list("ALLOWED_ID_TAGS"))
-    # Plug & Charge serverseitig: beim Einstecken (Status "Preparing") automatisch RemoteStart senden
-    auto_start: bool = field(default_factory=lambda: _bool("AUTO_START", True))
+    # Beim Einstecken sofort RemoteStart senden, auch wenn EVCC (noch) nicht freigegeben hat.
+    # Standard aus: Wallboxen wie die Solax ignorieren ein 0-A-Profil zu Beginn und laden sonst
+    # sofort mit voller Leistung. Ohne Auto-Start startet die Bridge erst bei EVCC-Freigabe.
+    auto_start: bool = field(default_factory=lambda: _bool("AUTO_START", False))
     # Pausieren: "profile" = 0 A per Ladeprofil (Transaktion bleibt), "stop" = RemoteStopTransaction
     disable_mode: str = field(default_factory=lambda: os.environ.get("DISABLE_MODE", "profile").lower())
-    # Wenn Ladeprofile abgelehnt werden: beim Pausieren auf RemoteStop ausweichen
+    # Wenn Ladeprofile abgelehnt oder ignoriert werden: beim Pausieren auf RemoteStop ausweichen
     stop_fallback: bool = field(default_factory=lambda: _bool("STOP_FALLBACK", True))
 
     # Ladeprofil-Feinheiten (wie in EVCC)
     profile_id: int = field(default_factory=lambda: _int("PROFILE_ID", 1))
-    stack_level: int = field(default_factory=lambda: _int("STACK_LEVEL", 0))
+    # leer/"auto" = höchste Stufe aus ChargeProfileMaxStackLevel (wie EVCC), sonst feste Zahl
+    stack_level: Optional[int] = field(default_factory=lambda: _opt_int("STACK_LEVEL"))
     # Einheit der Ladeprofile: "auto" (aus GetConfiguration), "A" oder "W"
     rate_unit: str = field(default_factory=lambda: os.environ.get("RATE_UNIT", "auto").strip())
     # Netzspannung für die Umrechnung A → W
     voltage: float = field(default_factory=lambda: float(os.environ.get("VOLTAGE", "230")))
     # Standard-Ladestrom, bis EVCC einen Wert vorgibt
     default_current: float = field(default_factory=lambda: float(os.environ.get("DEFAULT_CURRENT", "6")))
+
+    # Kontrolle, ob die Wallbox das Limit einhält; sonst andere Profilvarianten probieren
+    enforce: bool = field(default_factory=lambda: _bool("ENFORCE", True))
+    # Sekunden nach einer Änderung, bevor gemessen wird (Auto braucht Zeit zum Nachregeln)
+    enforce_grace: float = field(default_factory=lambda: float(os.environ.get("ENFORCE_GRACE", "30")))
+    # erlaubte Überschreitung in A pro Phase
+    enforce_tolerance: float = field(default_factory=lambda: float(os.environ.get("ENFORCE_TOLERANCE", "1.5")))
 
     # HTTP-API
     api_token: str = field(default_factory=lambda: os.environ.get("API_TOKEN", ""))

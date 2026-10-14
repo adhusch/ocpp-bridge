@@ -131,7 +131,7 @@ def test_boot_setup_and_measurands(tmp_path):
 
 
 def test_plug_and_charge_remote_start_and_evcc_control(tmp_path):
-    with running(tmp_path) as e:
+    with running(tmp_path, bridge_env={"AUTO_START": "true"}) as e:
         e.simctl("plug")
         # Auto-Start: RemoteStart, Transaktion, aber 0 A solange EVCC nicht freigibt
         st = wait_for(lambda: (s := e.state())["transaction_id"] and s["ocpp_status"] == "SuspendedEVSE" and s,
@@ -289,6 +289,67 @@ def test_solax_watt_profile_single_phase_car(tmp_path):
         wait_for(lambda: e.simstate()["limit_w"] == 2300.0 and e.state()["currents"][0] == 10.0,
                  msg="Watt-Limit auf 1 Phase umgerechnet")
         assert any("1-phasig" in t for t in e.events())
+
+
+def test_no_charging_before_evcc_enables(tmp_path):
+    # Realer Fall 14.10.: Auto eingesteckt, EVCC im PV-Modus ohne Überschuss → darf NICHT laden
+    with running(tmp_path, sim_env={"SOLAX_QUIRKS": "1", "CAR_MAX_A": "12"}) as e:
+        e.simctl("plug")
+        time.sleep(3)
+        st, sim = e.state(), e.simstate()
+        assert st["status"] == "B" and st["transaction_id"] is None
+        assert sim["power_w"] == 0 and not any(r.startswith("RemoteStartTransaction") for r in sim["received"])
+        http("POST", e.api("/api/_/maxcurrent"), "6")
+        http("POST", e.api("/api/_/enable"), "true")
+        wait_for(lambda: (s := e.state())["status"] == "C" and s["currents"][0] == 6.0, msg="lädt erst nach Freigabe mit 6 A")
+
+
+def test_stack_level_from_wallbox(tmp_path):
+    # Solax meldet ChargeProfileMaxStackLevel=2; ein internes Profil auf Stufe 1 überstimmt Stufe 0
+    with running(tmp_path, bridge_env={"ENFORCE_GRACE": "3"},
+                 sim_env={"SOLAX_QUIRKS": "1", "MIN_STACK": "1", "CAR_MAX_A": "12"}) as e:
+        assert any("Stack Level 2" in t for t in e.events())
+        http("POST", e.api("/api/_/maxcurrent"), "6")
+        http("POST", e.api("/api/_/enable"), "true")
+        e.simctl("plug")
+        wait_for(lambda: (s := e.state())["status"] == "C" and s["currents"][0] == 6.0, msg="6 A mit Stack 2")
+        wait_for(lambda: e.state()["profile_effective"] is True, msg="als wirksam erkannt")
+        assert e.state()["profile_variant"] == 0
+
+
+def test_escalates_to_working_profile_variant(tmp_path):
+    # Wallbox nimmt TxDefaultProfile an, hält es aber nicht ein; nur TxProfile in W wirkt
+    with running(tmp_path, bridge_env={"ENFORCE_GRACE": "3"},
+                 sim_env={"SOLAX_QUIRKS": "1", "HONOR_PROFILES": "TxProfile/W", "CAR_MAX_A": "12"}) as e:
+        http("POST", e.api("/api/_/maxcurrent"), "6")
+        http("POST", e.api("/api/_/enable"), "true")
+        e.simctl("plug")
+        wait_for(lambda: e.state()["currents"][0] == 12.0, msg="lädt zunächst ungebremst")
+        st = wait_for(lambda: (s := e.state())["currents"][0] == 6.0 and s["profile_effective"] and s,
+                      timeout=40, msg="Variante TxProfile greift")
+        assert st["profile_variant"] == 1
+        assert any("probiere Variante 2" in t for t in e.events())
+        # Pause per Profil funktioniert jetzt auch
+        http("POST", e.api("/api/_/enable"), "false")
+        wait_for(lambda: e.state()["ocpp_status"] == "SuspendedEVSE", msg="pausiert per Profil")
+        assert e.state()["transaction_id"] is not None
+
+
+def test_all_profiles_ignored_pause_stops_transaction(tmp_path):
+    with running(tmp_path, bridge_env={"ENFORCE_GRACE": "2"},
+                 sim_env={"SOLAX_QUIRKS": "1", "HONOR_PROFILES": "none", "CAR_MAX_A": "12"}) as e:
+        http("POST", e.api("/api/_/maxcurrent"), "6")
+        http("POST", e.api("/api/_/enable"), "true")
+        e.simctl("plug")
+        wait_for(lambda: e.state()["profiles_ignored"], timeout=90, msg="alle Varianten durchprobiert")
+        assert e.state()["status"] == "C"  # laden geht weiter, nur eben ungebremst
+        http("POST", e.api("/api/_/enable"), "false")
+        wait_for(lambda: (s := e.state())["transaction_id"] is None and s["power"] == 0,
+                 msg="Pause per RemoteStop")
+        assert any(r.startswith("RemoteStopTransaction") for r in e.simstate()["received"])
+        # erneute Freigabe startet wieder
+        http("POST", e.api("/api/_/enable"), "true")
+        wait_for(lambda: e.state()["status"] == "C", msg="neu gestartet")
 
 
 def test_unknown_charger_reports_offline(tmp_path):

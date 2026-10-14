@@ -69,6 +69,10 @@ class ChargerState:
     profile_supported: Optional[bool] = None
     last_profile_status: str = ""
     features: str = ""
+    # Durchsetzung des Limits: welche Profilvariante wirkt, und ob die Box Profile ganz ignoriert
+    profile_variant: int = 0
+    profile_effective: Optional[bool] = None
+    profiles_ignored: bool = False
 
     def evcc_status(self) -> str:
         if not self.connected:
@@ -108,7 +112,7 @@ class Store:
     PERSIST_KEYS = (
         "transaction_id", "id_tag", "last_id_tag", "tx_start", "meter_start_wh",
         "desired_enabled", "max_current", "phases", "energy_kwh", "last_session_kwh",
-        "vendor", "model", "firmware", "serial",
+        "vendor", "model", "firmware", "serial", "profile_variant", "profiles_ignored",
     )
 
     def __init__(self, data_dir: str, default_current: float):

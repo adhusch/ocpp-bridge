@@ -235,6 +235,7 @@ class Bridge:
             res = await cp.apply()
         elif action == "setup":
             cp._setup_done = False
+            cp.reset_profile_detection()  # Profilvarianten neu ermitteln
             await cp.setup()
             res = "done"
         else:

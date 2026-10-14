@@ -18,6 +18,17 @@ log = logging.getLogger("cp")
 
 STRICT = False  # eingehende Nachrichten tolerant behandeln (reale Wallboxen weichen gern ab)
 
+# Profilvarianten, die nacheinander probiert werden, wenn die Wallbox ein Limit nicht einhält.
+# unit: "auto" = wie von der Wallbox gemeldet, "flip" = die jeweils andere Einheit (A↔W)
+VARIANTS = [
+    {"purpose": "TxDefaultProfile", "unit": "auto", "connector": "cfg"},
+    {"purpose": "TxProfile", "unit": "auto", "connector": "cfg"},
+    {"purpose": "TxDefaultProfile", "unit": "flip", "connector": "cfg"},
+    {"purpose": "TxProfile", "unit": "flip", "connector": "cfg"},
+    {"purpose": "ChargePointMaxProfile", "unit": "auto", "connector": 0},
+    {"purpose": "ChargePointMaxProfile", "unit": "flip", "connector": 0},
+]
+
 
 def now_iso(offset: timedelta = timedelta(0)) -> str:
     return (datetime.now(timezone.utc) + offset).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -42,6 +53,13 @@ class ChargePoint(OcppChargePoint):
         self._setup_done = False
         self._last_remote_start = 0.0
         self._last_w_phases = 0
+        self.max_stack_level = 0       # aus ChargeProfileMaxStackLevel
+        # Durchsetzung: zuletzt gesetztes Limit und Messungen danach
+        self._target: Optional[float] = None
+        self._target_ts = 0.0
+        self._violations = 0
+        self._enforcing = False
+        self._last_enforce_stop = 0.0
         self._tasks: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------ helpers
@@ -126,13 +144,18 @@ class ChargePoint(OcppChargePoint):
             # Auto abgesteckt: Transaktion ist vorbei, auch wenn StopTransaction noch fehlt
             self._finish_transaction(None, "Fahrzeug getrennt")
 
-        if status in ("Available", "Unavailable"):
+        if status in ("Available", "Unavailable", "Preparing", "Finishing"):
+            # in diesen Zuständen fließt kein Strom; ohne Transaktion kommen keine Messwerte mehr
             self.st.power_w = 0.0
             self.st.currents = [0.0, 0.0, 0.0]
 
-        # Plug & Charge serverseitig: eingesteckt, aber noch keine Transaktion
-        if status == "Preparing" and self.st.transaction_id is None and self.cfg.auto_start:
-            self._spawn(self.remote_start(reason="Plug & Charge (Auto-Start)"), 0.5)
+        # Eingesteckt, aber noch keine Transaktion: starten, wenn EVCC schon freigegeben hat
+        # (oder immer, wenn AUTO_START gesetzt ist)
+        if status == "Preparing" and self.st.transaction_id is None:
+            if self.st.desired_enabled:
+                self._spawn(self.remote_start(reason="eingesteckt, EVCC hat freigegeben"), 0.5)
+            elif self.cfg.auto_start:
+                self._spawn(self.remote_start(reason="Plug & Charge (Auto-Start)"), 0.5)
         return call_result.StatusNotification()
 
     def _authorize(self, id_tag: str) -> str:
@@ -180,6 +203,8 @@ class ChargePoint(OcppChargePoint):
         self.st.id_tag = ""
         self.st.meter_start_wh = None
         self.st.tx_start = None
+        self.st.power_w = 0.0
+        self.st.currents = [0.0, 0.0, 0.0]
         self._event(f"Transaktion #{tx} beendet ({reason}), geladen: {self.st.last_session_kwh} kWh")
         self.store.save()
 
@@ -222,7 +247,90 @@ class ChargePoint(OcppChargePoint):
             self._event(f"Auto lädt {self._active_phases()}-phasig – Watt-Limit wird angepasst")
             self._last_w_phases = self._active_phases()
             self._spawn(self.set_current(self.st.max_current))
+        if cid == self.cfg.connector_id:
+            self._check_limit()
         return call_result.MeterValues()
+
+    # ------------------------------------------------- Durchsetzung des Limits
+    def _check_limit(self):
+        """Prüft nach jedem Messwert, ob die Wallbox das gesetzte Limit einhält."""
+        if not self.cfg.enforce or self._target is None or self._enforcing:
+            return
+        if time.time() - self._target_ts < self.cfg.enforce_grace:
+            return
+        if self.st.ocpp_status not in ("Charging", "SuspendedEV", "SuspendedEVSE"):
+            self._violations = 0
+            return
+        target = self._target
+        measured = max(self.st.currents or [0.0])
+        allowed = target + self.cfg.enforce_tolerance if target > 0 else 1.0
+
+        if self.st.profiles_ignored:
+            # Profile wirken nicht: Pause nur noch per RemoteStop möglich
+            if (target == 0 and measured > allowed and self.st.transaction_id is not None
+                    and self.cfg.stop_fallback and time.time() - self._last_enforce_stop > 60):
+                self._last_enforce_stop = time.time()
+                self._spawn(self.remote_stop(reason="Pause, Wallbox ignoriert Ladeprofile"))
+            return
+
+        if measured > allowed:
+            self._violations += 1
+            if self._violations >= 2:
+                self._violations = 0
+                self._enforcing = True
+                self._spawn(self._escalate(target, measured))
+            return
+
+        self._violations = 0
+        if (measured > 1.0 or target == 0) and self.st.profile_effective is not True:
+            self.st.profile_effective = True
+            self._event(f"Limit {target:g} A wird eingehalten (gemessen {measured:.1f} A, "
+                        f"Variante {self.st.profile_variant + 1}: {self._variant_desc()})")
+            self.store.save()
+
+    def _variant_desc(self, n: Optional[int] = None) -> str:
+        v = VARIANTS[self.st.profile_variant if n is None else n]
+        conn = self.cfg.connector_id if v["connector"] == "cfg" else v["connector"]
+        return f"{v['purpose']}, {self._unit_for(v)}, Connector {conn}, Stack {self._stack_level()}"
+
+    async def _clear_profiles(self):
+        try:
+            res = await self.call(call.ClearChargingProfile())
+            self._event(f"ClearChargingProfile: {res.status if res else 'Error'}")
+        except Exception as e:
+            self._event(f"ClearChargingProfile fehlgeschlagen: {e!r}")
+
+    async def _escalate(self, target: float, measured: float):
+        try:
+            n = self.st.profile_variant
+            if n + 1 < len(VARIANTS):
+                self.st.profile_variant = n + 1
+                self.st.profile_effective = None
+                self._event(f"Wallbox hält Limit {target:g} A nicht ein (gemessen {measured:.1f} A) → "
+                            f"probiere Variante {n + 2}/{len(VARIANTS)}: {self._variant_desc()}")
+                self.store.save()
+                await self._clear_profiles()
+                await self.set_current(target)
+                return
+            # alle Varianten durch: Profile wirken nicht
+            self.st.profile_variant = 0
+            self.st.profiles_ignored = True
+            self.st.profile_effective = False
+            self.store.save()
+            self._event("WARNUNG: Wallbox ignoriert alle Ladeprofil-Varianten – Strombegrenzung per OCPP "
+                        "nicht möglich. Pausieren erfolgt ab jetzt per RemoteStopTransaction.")
+            await self._clear_profiles()
+            if target == 0 and self.st.transaction_id is not None and self.cfg.stop_fallback:
+                self._last_enforce_stop = time.time()
+                await self.remote_stop(reason="Pause, Wallbox ignoriert Ladeprofile")
+        finally:
+            self._enforcing = False
+
+    def reset_profile_detection(self):
+        self.st.profile_variant = 0
+        self.st.profiles_ignored = False
+        self.st.profile_effective = None
+        self.store.save()
 
     def _parse_sampled(self, samples: list, connector0: bool):
         power_total = None
@@ -325,6 +433,13 @@ class ChargePoint(OcppChargePoint):
                     self.rate_unit = "A"
             else:
                 self._event(f"Ladeprofil-Einheit fest auf {self.rate_unit} (RATE_UNIT)")
+            msl = (keys.get("chargeprofilemaxstacklevel") or {}).get("value")
+            if msl is not None and str(msl).strip().isdigit():
+                self.max_stack_level = int(msl)
+            self._event(f"Ladeprofile: Stack Level {self._stack_level()}"
+                        + (" (höchste Stufe der Wallbox, wie EVCC)" if self.cfg.stack_level is None else " (STACK_LEVEL)")
+                        + f", Variante {self.st.profile_variant + 1}"
+                        + (" – Wallbox ignorierte Profile bisher, Pause per RemoteStop" if self.st.profiles_ignored else ""))
             sampled_ro = bool((keys.get("metervaluessampleddata") or {}).get("readonly"))
         except Exception as e:
             self._event(f"GetConfiguration fehlgeschlagen: {e!r}")
@@ -387,12 +502,13 @@ class ChargePoint(OcppChargePoint):
     async def remote_stop(self, reason: str = "manuell") -> str:
         if self.st.transaction_id is None:
             return "NoTransaction"
+        tx = self.st.transaction_id
         try:
-            res = await self.call(call.RemoteStopTransaction(transaction_id=self.st.transaction_id))
+            res = await self.call(call.RemoteStopTransaction(transaction_id=tx))
             status = res.status if res else "Error"
         except Exception as e:
             status = f"Fehler {e!r}"
-        self._event(f"RemoteStopTransaction #{self.st.transaction_id} ({reason}): {status}")
+        self._event(f"RemoteStopTransaction #{tx} ({reason}): {status}")
         return status
 
     def _active_phases(self) -> int:
@@ -405,40 +521,69 @@ class ChargePoint(OcppChargePoint):
                 return n
         return 3
 
-    def _profile(self, current: float) -> dict:
+    def _stack_level(self) -> int:
+        return self.cfg.stack_level if self.cfg.stack_level is not None else self.max_stack_level
+
+    def _unit_for(self, variant: dict) -> str:
+        if variant["unit"] == "flip":
+            return "A" if self.rate_unit == "W" else "W"
+        return self.rate_unit
+
+    def _variant_call(self, current: float) -> tuple[int, dict, str]:
+        """(connectorId, Profil, Einheit) für die aktuelle Variante."""
+        v = VARIANTS[self.st.profile_variant % len(VARIANTS)]
+        unit = self._unit_for(v)
+        purpose = v["purpose"]
+        connector = self.cfg.connector_id if v["connector"] == "cfg" else v["connector"]
+        # TxProfile braucht eine laufende Transaktion; vorher als Default-Profil setzen
+        if purpose == "TxProfile" and self.st.transaction_id is None:
+            purpose = "TxDefaultProfile"
         phases = self.st.phases or None
-        if self.rate_unit == "W":
+        if unit == "W":
             limit = float(int(self.cfg.voltage * current * self._active_phases()))
         else:
             limit = float(int(current * 10) / 10)
         period = {"start_period": 0, "limit": limit}
         if phases:
             period["number_phases"] = phases
-        return {
+        profile = {
             "charging_profile_id": self.cfg.profile_id,
-            "stack_level": self.cfg.stack_level,
-            "charging_profile_purpose": "TxDefaultProfile",
+            "stack_level": self._stack_level(),
+            "charging_profile_purpose": purpose,
             "charging_profile_kind": "Absolute",
             "charging_schedule": {
-                "charging_rate_unit": self.rate_unit,
+                "charging_rate_unit": unit,
                 "start_schedule": now_iso(timedelta(minutes=-1)),
                 "charging_schedule_period": [period],
             },
         }
+        if purpose == "TxProfile":
+            profile["transaction_id"] = self.st.transaction_id
+        return connector, profile, unit
+
+    def _profile(self, current: float) -> dict:
+        return self._variant_call(current)[1]
 
     async def set_current(self, current: float) -> str:
+        connector, profile, unit = self._variant_call(current)
         try:
-            res = await self.call(call.SetChargingProfile(
-                connector_id=self.cfg.connector_id, cs_charging_profiles=self._profile(current)))
+            res = await self.call(call.SetChargingProfile(connector_id=connector, cs_charging_profiles=profile))
             status = res.status if res else "Error"
         except Exception as e:
             status = f"Fehler {e!r}"
         self.st.profile_supported = status == "Accepted"
         self.st.last_profile_status = status
-        unit_txt = f" (= {self._profile(current)['charging_schedule']['charging_schedule_period'][0]['limit']:g} W bei {self._active_phases()}p)" \
-            if self.rate_unit == "W" else ""
+        limit = profile["charging_schedule"]["charging_schedule_period"][0]["limit"]
+        unit_txt = f" (= {limit:g} W bei {self._active_phases()}p)" if unit == "W" else ""
         self._last_w_phases = self._active_phases()
-        self._event(f"Ladeprofil {current:g} A" + (f"/{self.st.phases}p" if self.st.phases else "") + unit_txt + f": {status}")
+        if self._target is None or abs(self._target - current) >= 0.1:
+            self.st.profile_effective = None if not self.st.profiles_ignored else False
+        self._target = current
+        self._target_ts = time.time()
+        self._violations = 0
+        self._event(f"Ladeprofil {current:g} A" + (f"/{self.st.phases}p" if self.st.phases else "") + unit_txt
+                    + f" [{profile['charging_profile_purpose']}, Stack {profile['stack_level']}, Connector {connector}]"
+                    + f": {status}")
         return status
 
     async def apply(self) -> str:
@@ -454,8 +599,12 @@ class ChargePoint(OcppChargePoint):
             return await self.remote_stop(reason="EVCC Pause") if self.st.transaction_id else "Accepted"
 
         status = await self.set_current(0)
-        if status != "Accepted" and self.cfg.stop_fallback and self.st.transaction_id is not None:
-            return await self.remote_stop(reason="Ladeprofil abgelehnt, Fallback")
+        if self.st.transaction_id is not None and self.cfg.stop_fallback:
+            if status != "Accepted":
+                return await self.remote_stop(reason="Ladeprofil abgelehnt, Fallback")
+            if self.st.profiles_ignored:
+                self._last_enforce_stop = time.time()
+                return await self.remote_stop(reason="Pause, Wallbox ignoriert Ladeprofile")
         return status
 
     async def trigger(self, message: str) -> str:

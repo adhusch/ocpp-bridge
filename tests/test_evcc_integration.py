@@ -82,9 +82,19 @@ loadpoints:
     return p
 
 
-@pytest.mark.parametrize("quirks", ["0", "1"], ids=["ampere-profile", "solax-watt-profile"])
-def test_with_real_evcc(tmp_path, quirks):
-    env = Env(tmp_path, {}, {"METER_EVERY": "2", "SOLAX_QUIRKS": quirks})
+SCENARIOS = {
+    "ampere-profile": ({}, {"SOLAX_QUIRKS": "0"}),
+    "solax-watt-profile": ({}, {"SOLAX_QUIRKS": "1"}),
+    # Solax nimmt TxDefaultProfile an, ignoriert es aber (realer Fall 14.10.2026)
+    "solax-ignores-default-profile": ({"ENFORCE_GRACE": "8"},
+                                      {"SOLAX_QUIRKS": "1", "HONOR_PROFILES": "TxProfile/W"}),
+}
+
+
+@pytest.mark.parametrize("scenario", list(SCENARIOS))
+def test_with_real_evcc(tmp_path, scenario):
+    bridge_env, sim_env = SCENARIOS[scenario]
+    env = Env(tmp_path, bridge_env, {"METER_EVERY": "2", **sim_env})
     evcc_port, house_port = free_port(), free_port()
     procs = []
     try:
@@ -119,12 +129,14 @@ def test_with_real_evcc(tmp_path, quirks):
         # 1) einstecken, Modus off → verbunden, aber gesperrt
         env.simctl("plug")
         wait_for(lambda: (l := lp())["connected"] and not l["enabled"], timeout=40, msg="EVCC sieht Auto")
-        assert lp()["vehicleIdentity"] == "evcc"
+        time.sleep(5)
+        assert env.simstate()["power_w"] == 0 and not lp()["charging"], "lädt ohne Freigabe"
 
         # 2) Sofortladen → 16 A, 3-phasig
         set_mode("now")
         wait_for(lambda: (l := lp())["charging"] and l["chargePower"] > 10000, timeout=60, msg="Sofortladen 16 A")
         assert env.simstate()["current_a"] == 16.0
+        assert lp()["vehicleIdentity"] == "evcc"
 
         # 3) PV-Überschuss ~6 kW → Strom wird heruntergeregelt
         pv(6000)
