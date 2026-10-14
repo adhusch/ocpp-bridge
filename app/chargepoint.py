@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -53,6 +54,10 @@ class ChargePoint(OcppChargePoint):
         self._setup_done = False
         self._last_remote_start = 0.0
         self._last_w_phases = 0
+        self._force_phases: Optional[int] = None
+        self._detected_phases: Optional[int] = None
+        self._phase_hist: deque = deque(maxlen=3)
+        self._accepted_target: Optional[float] = None  # zuletzt von der Wallbox angenommenes Limit
         self.max_stack_level = 0       # aus ChargeProfileMaxStackLevel
         # Durchsetzung: zuletzt gesetztes Limit und Messungen danach
         self._target: Optional[float] = None
@@ -240,9 +245,11 @@ class ChargePoint(OcppChargePoint):
         for mv in meter_value or []:
             self._parse_sampled(mv.get("sampled_value") or [], connector0=(cid == 0))
         self.st.meter_ts = time.time()
-        # Watt-Profile: wenn das Auto mit anderer Phasenzahl lädt als angenommen, Limit neu rechnen
-        if (self.rate_unit == "W" and self.st.desired_enabled and cid == self.cfg.connector_id
-                and self.st.ocpp_status == "Charging"
+        if cid == self.cfg.connector_id:
+            self._track_phases()
+        # Watt-Profile: wenn das Auto stabil mit anderer Phasenzahl lädt als angenommen, Limit neu rechnen
+        if (self.rate_unit == "W" and self.cfg.phase_detect and self.st.desired_enabled
+                and cid == self.cfg.connector_id and self.st.ocpp_status == "Charging"
                 and self._last_w_phases and self._active_phases() != self._last_w_phases):
             self._event(f"Auto lädt {self._active_phases()}-phasig – Watt-Limit wird angepasst")
             self._last_w_phases = self._active_phases()
@@ -512,14 +519,27 @@ class ChargePoint(OcppChargePoint):
         return status
 
     def _active_phases(self) -> int:
-        """Phasen für die A→W-Umrechnung: Vorgabe von EVCC, sonst gemessen, sonst 3."""
+        """Phasen für die A→W-Umrechnung: Vorgabe von EVCC, sonst (optional) stabil gemessen, sonst 3.
+
+        Wie EVCC wird ohne Vorgabe mit 3 Phasen gerechnet. Einzelne Messwerte taugen nicht zur
+        Erkennung: beim Hochfahren steht eine Phase oft noch kurz bei <1 A (Solax, 14.10.2026).
+        """
+        if self._force_phases:
+            return self._force_phases
         if self.st.phases:
             return self.st.phases
-        if self.st.ocpp_status == "Charging":
-            n = sum(1 for c in self.st.currents if (c or 0) > 1.0)
-            if n in (1, 2):
-                return n
+        if self.cfg.phase_detect and self._detected_phases in (1, 2):
+            return self._detected_phases
         return 3
+
+    def _track_phases(self):
+        """Phasenzahl nur übernehmen, wenn 3 Messwerte in Folge bei echtem Ladestrom übereinstimmen."""
+        if self.st.ocpp_status != "Charging" or max(self.st.currents or [0.0]) < 4.0:
+            self._phase_hist.clear()
+            return
+        self._phase_hist.append(sum(1 for c in self.st.currents if (c or 0) > 1.0))
+        if len(self._phase_hist) == self._phase_hist.maxlen and len(set(self._phase_hist)) == 1:
+            self._detected_phases = self._phase_hist[0]
 
     def _stack_level(self) -> int:
         return self.cfg.stack_level if self.cfg.stack_level is not None else self.max_stack_level
@@ -582,28 +602,87 @@ class ChargePoint(OcppChargePoint):
             status = f"Fehler {e!r}"
         return status, connector, profile, unit
 
+    async def _refine_max_power(self, current: float, lo: float, hi: float, hi_rejected: bool):
+        """Höchstes akzeptiertes Watt-Limit zwischen lo (angenommen) und hi suchen, auf 100 W genau.
+
+        Hintergrund: Die Solax lehnt alles über ihrem eingestellten Maximalstrom ab (14.10.2026:
+        11040 und 11000 W abgelehnt, 7400 W angenommen, ungebremst ~8,3 kW).
+        """
+        tries = 0
+        if not hi_rejected:
+            self.st.max_power_w = hi
+            res = await self._send_profile(current)
+            tries += 1
+            if res[0] == "Accepted":
+                self.st.max_power_rejected = None
+                self.store.save()
+                return res
+        while hi - lo > 100 and tries < 10:
+            mid = float(int((lo + hi) / 2 / 10) * 10)
+            self.st.max_power_w = mid
+            res = await self._send_profile(current)
+            tries += 1
+            if res[0] == "Accepted":
+                lo = mid
+            else:
+                hi = mid
+        self.st.max_power_w = lo
+        self.st.max_power_rejected = hi
+        self.store.save()
+        self._event(f"Höchstleistung der Wallbox ermittelt: {lo:g} W angenommen, {hi:g} W abgelehnt "
+                    f"→ Watt-Limit wird auf {lo:g} W begrenzt (fest einstellbar mit MAX_POWER)")
+        return await self._send_profile(current)  # endgültig mit lo setzen
+
     async def set_current(self, current: float) -> str:
         status, connector, profile, unit = await self._send_profile(current)
 
         # Watt-Limit über der Höchstleistung der Wallbox (z. B. 11040 W bei einer 11-kW-Box):
-        # schrittweise kappen und den akzeptierten Wert merken
-        if status == "Rejected" and unit == "W" and current > 0 and not self.cfg.max_power:
-            rejected = profile["charging_schedule"]["charging_schedule_period"][0]["limit"]
-            for cap in (c for c in self.POWER_STEPS if c < rejected):
-                self.st.max_power_w = float(cap)
-                status, connector, profile, unit = await self._send_profile(current)
-                if status == "Accepted":
-                    self._event(f"Wallbox lehnt {rejected:g} W ab, akzeptiert {cap} W → Watt-Limit wird künftig "
-                                f"auf {cap} W begrenzt (fest einstellbar mit MAX_POWER)")
-                    self.store.save()
-                    break
-            else:
-                self.st.max_power_w = None
-        if status == "Rejected" and current > 0 and self.st.desired_enabled:
-            # sonst bliebe ein älteres 0-A-Profil aktiv und das Auto lädt gar nicht
-            self._event(f"Ladeprofil {current:g} A abgelehnt – lösche Ladeprofile, damit nicht bei 0 A hängen bleibt")
-            await self._clear_profiles()
+        # herantasten und den akzeptierten Höchstwert merken
+        if unit == "W" and current > 0 and not self.cfg.max_power:
+            sent = profile["charging_schedule"]["charging_schedule_period"][0]["limit"]
+            wanted = float(int(self.cfg.voltage * current * self._active_phases()))
+            cap, rej = self.st.max_power_w, self.st.max_power_rejected
+            if status == "Rejected":
+                hi, lo = sent, None
+                for step in (c for c in self.POWER_STEPS if c < sent):
+                    self.st.max_power_w = float(step)
+                    res = await self._send_profile(current)
+                    if res[0] == "Accepted":
+                        lo = float(step)
+                        break
+                    hi = float(step)
+                if lo is None:
+                    self.st.max_power_w = cap  # nichts gefunden: alten Stand behalten
+                else:
+                    status, connector, profile, unit = await self._refine_max_power(current, lo, hi, True)
+            elif (status == "Accepted" and cap and wanted > cap
+                  and (rej is None or rej - cap > 100)):
+                # früher grob ermittelter Höchstwert (z. B. 7400 W): nachschärfen
+                hi = min(wanted, rej) if rej else wanted
+                status, connector, profile, unit = await self._refine_max_power(
+                    current, cap, hi, hi_rejected=bool(rej and rej <= wanted))
 
+        attempted = current
+        if status == "Rejected" and current > 0:
+            limit = profile["charging_schedule"]["charging_schedule_period"][0]["limit"]
+            if self._accepted_target:
+                # Nie Profile löschen: sonst lädt das Auto ungebremst. Letztes Limit bleibt aktiv.
+                self._event(f"Ladeprofil {current:g} A (= {limit:g} {unit}) abgelehnt – "
+                            f"bisheriges Limit {self._accepted_target:g} A bleibt aktiv")
+                self.st.last_profile_status = status
+                return status
+            if self.st.desired_enabled:
+                # sonst bliebe ein 0-A-Profil aktiv und das Auto lädt gar nicht: Mindeststrom 6 A, 3 Phasen
+                self._event(f"Ladeprofil {current:g} A (= {limit:g} {unit}) abgelehnt – versuche Mindeststrom 6 A")
+                self._force_phases = 3
+                try:
+                    status, connector, profile, unit = await self._send_profile(6.0)
+                finally:
+                    self._force_phases = None
+                current = 6.0
+
+        if status == "Accepted":
+            self._accepted_target = current
         self.st.profile_supported = status == "Accepted"
         self.st.last_profile_status = status
         limit = profile["charging_schedule"]["charging_schedule_period"][0]["limit"]
@@ -614,7 +693,8 @@ class ChargePoint(OcppChargePoint):
         self._target = current
         self._target_ts = time.time()
         self._violations = 0
-        self._event(f"Ladeprofil {current:g} A" + (f"/{self.st.phases}p" if self.st.phases else "") + unit_txt
+        self._event(f"Ladeprofil {current:g} A" + (f" (statt {attempted:g} A)" if attempted != current else "")
+                    + (f"/{self.st.phases}p" if self.st.phases else "") + unit_txt
                     + f" [{profile['charging_profile_purpose']}, Stack {profile['stack_level']}, Connector {connector}]"
                     + f": {status}")
         return status

@@ -282,7 +282,7 @@ def test_solax_quirks_watt_profiles(tmp_path):
 
 def test_solax_watt_profile_single_phase_car(tmp_path):
     # Auto lädt nur 1-phasig: 10 A bei angenommenen 3 Phasen wären 30 A auf L1 → Bridge muss nachregeln
-    with running(tmp_path, sim_env={"SOLAX_QUIRKS": "1", "CAR_PHASES": "1"}) as e:
+    with running(tmp_path, bridge_env={"RATE_UNIT": "W", "PHASE_DETECT": "true"}, sim_env={"CAR_PHASES": "1"}) as e:
         http("POST", e.api("/api/_/maxcurrent"), "10")
         http("POST", e.api("/api/_/enable"), "true")
         e.simctl("plug")
@@ -361,11 +361,64 @@ def test_solax_rejects_above_rated_power(tmp_path):
         st = wait_for(lambda: (s := e.state())["status"] == "C" and s["currents"][0] > 15 and s,
                       msg="lädt mit gekapptem Limit")
         assert st["max_power_w"] == 11000 and e.simstate()["limit_w"] == 11000.0
-        assert any("akzeptiert 11000 W" in t for t in e.events())
+        assert any("11000 W angenommen" in t for t in e.events())
         # gemerkt: nächste Änderung geht direkt mit Kappung durch
         http("POST", e.api("/api/_/maxcurrent"), "15")
         http("POST", e.api("/api/_/maxcurrent"), "16")
         assert sum("abgelehnt: 11040" in r for r in e.simstate()["received"]) == 1
+
+
+def test_finds_exact_max_power(tmp_path):
+    # Reale Solax 14.10.: lehnt 11040 und 11000 W ab, ungebremst ~12 A ≈ 8,3 kW → Höchstwert genau finden
+    with running(tmp_path, sim_env={"SOLAX_QUIRKS": "1", "MAX_POWER_W": "8280"}) as e:
+        http("POST", e.api("/api/_/maxcurrent"), "16")
+        http("POST", e.api("/api/_/enable"), "true")
+        e.simctl("plug")
+        st = wait_for(lambda: (s := e.state())["status"] == "C" and s["max_power_w"] and s, timeout=40,
+                      msg="Höchstwert ermittelt")
+        assert 8180 <= st["max_power_w"] <= 8280 and st["max_power_rejected"] > 8280
+        assert 8180 <= e.simstate()["limit_w"] <= 8280
+
+
+def test_refines_previously_coarse_max_power(tmp_path):
+    # Stand des Nutzers: gespeicherter Höchstwert 7400 W aus der groben Stufensuche
+    import json
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "state.json").write_text(json.dumps(
+        {"next_tx_id": 1, "chargers": {"SIMSOLAX01": {"max_power_w": 7400.0}}}))
+    with running(tmp_path, sim_env={"SOLAX_QUIRKS": "1", "MAX_POWER_W": "8280"}) as e:
+        http("POST", e.api("/api/_/maxcurrent"), "16")
+        http("POST", e.api("/api/_/enable"), "true")
+        e.simctl("plug")
+        st = wait_for(lambda: (s := e.state())["status"] == "C" and (s["max_power_w"] or 0) > 8000 and s,
+                      timeout=40, msg="7400 W nachgeschärft")
+        assert st["max_power_w"] <= 8280
+
+
+def test_ramp_up_is_not_mistaken_for_two_phases(tmp_path):
+    # Realer Fall 14.10.: L1 kurz bei 0,66 A → Bridge rechnete "2-phasig" und setzte 2760 W bzw. 7360 W
+    with running(tmp_path, sim_env={"SOLAX_QUIRKS": "1", "RAMP_L1_SECONDS": "4"}) as e:
+        http("POST", e.api("/api/_/maxcurrent"), "10")
+        http("POST", e.api("/api/_/enable"), "true")
+        e.simctl("plug")
+        wait_for(lambda: e.state()["currents"][0] == 0.66, msg="Hochfahren mit L1 bei 0,66 A")
+        wait_for(lambda: e.state()["currents"] == [10.0, 10.0, 10.0], msg="alle 3 Phasen bei 10 A")
+        time.sleep(2)
+        assert not any("phasig" in t for t in e.events())
+        assert e.simstate()["limit_w"] == 6900.0
+
+
+def test_rejected_small_limit_keeps_previous(tmp_path):
+    # 1 Phase × 10 A = 2300 W liegt unter dem Solax-Minimum → nie Profile löschen (sonst ungebremst)
+    with running(tmp_path, sim_env={"SOLAX_QUIRKS": "1"}) as e:
+        http("POST", e.api("/api/_/maxcurrent"), "10")
+        http("POST", e.api("/api/_/enable"), "true")
+        e.simctl("plug")
+        wait_for(lambda: e.state()["currents"][0] == 10.0, msg="lädt mit 10 A")
+        http("POST", e.api("/api/_/phases"), "1")
+        wait_for(lambda: any("bisheriges Limit 10 A bleibt aktiv" in t for t in e.events()), msg="abgelehnt, altes Limit bleibt")
+        sim = e.simstate()
+        assert sim["limit_w"] == 6900.0 and not any(r.startswith("ClearChargingProfile") for r in sim["received"])
 
 
 def test_unknown_charger_reports_offline(tmp_path):

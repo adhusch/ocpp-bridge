@@ -84,10 +84,12 @@ loadpoints:
 
 SCENARIOS = {
     "ampere-profile": ({}, {"SOLAX_QUIRKS": "0"}),
-    "solax-watt-profile": ({}, {"SOLAX_QUIRKS": "1"}),
+    # MIN_POWER_W=0: Die echte Solax lehnt Watt-Limits unter 4140 W ab, 1-phasiges Laden per OCPP ist
+    # damit nicht möglich. Hier wird trotzdem die Umschalt-Logik der Bridge mit Watt-Profilen geprüft.
+    "solax-watt-profile": ({}, {"SOLAX_QUIRKS": "1", "MIN_POWER_W": "0"}),
     # Solax nimmt TxDefaultProfile an, ignoriert es aber (realer Fall 14.10.2026)
     "solax-ignores-default-profile": ({"ENFORCE_GRACE": "8"},
-                                      {"SOLAX_QUIRKS": "1", "HONOR_PROFILES": "TxProfile/W"}),
+                                      {"SOLAX_QUIRKS": "1", "HONOR_PROFILES": "TxProfile/W", "MIN_POWER_W": "0"}),
 }
 
 

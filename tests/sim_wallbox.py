@@ -45,6 +45,10 @@ REJECT_PROFILES = os.environ.get("REJECT_PROFILES", "0") == "1"
 HONOR_PROFILES = os.environ.get("HONOR_PROFILES", "*").strip()
 MIN_STACK = int(os.environ.get("MIN_STACK", "0"))
 # Watt-Limits über der Nennleistung ablehnen (echte Solax X3-HAC-11: 11040 W → Rejected)
+# Watt-Limits unter 6 A × 3 × 230 V ablehnen (echte Solax: 2760 W → Rejected, 4140 W → Accepted)
+MIN_POWER_W = float(os.environ.get("MIN_POWER_W", "4140" if os.environ.get("SOLAX_QUIRKS", "0") == "1" else "0"))
+# Hochfahren nachbilden: L1 steht nach dem Ladestart noch ein paar Sekunden bei 0,66 A
+RAMP_L1_SECONDS = float(os.environ.get("RAMP_L1_SECONDS", "0"))
 MAX_POWER_W = float(os.environ.get("MAX_POWER_W", "11000" if os.environ.get("SOLAX_QUIRKS", "0") == "1" else "0"))
 CAR_MAX_A = float(os.environ.get("CAR_MAX_A", "16"))
 CAR_PHASES = int(os.environ.get("CAR_PHASES", "3"))
@@ -106,7 +110,10 @@ class Sim(CP):
     async def update_charging(self):
         if self.tx_id is None:
             return
-        await self.set_status("Charging" if self.eff_current() >= 6 else "SuspendedEVSE")
+        new = "Charging" if self.eff_current() >= 6 else "SuspendedEVSE"
+        if new == "Charging" and self.status != "Charging":
+            self.charge_start = __import__("time").time()
+        await self.set_status(new)
 
     async def start_local(self, tag):
         res = await self.call(call.Authorize(id_tag=tag))
@@ -170,6 +177,9 @@ class Sim(CP):
         self.received.append(f"SetChargingProfile {p['charging_profile_purpose']} {period['limit']} {period.get('number_phases')} {sched['charging_rate_unit']}")
         if REJECT_PROFILES:
             return call_result.SetChargingProfile(status="Rejected")
+        if sched["charging_rate_unit"] == "W" and MIN_POWER_W and 0 < float(period["limit"]) < MIN_POWER_W:
+            self.received.append(f"  abgelehnt: {period['limit']} W < {MIN_POWER_W:g} W")
+            return call_result.SetChargingProfile(status="Rejected")
         if sched["charging_rate_unit"] == "W" and MAX_POWER_W and float(period["limit"]) > MAX_POWER_W:
             self.received.append(f"  abgelehnt: {period['limit']} W > {MAX_POWER_W:g} W")
             return call_result.SetChargingProfile(status="Rejected")
@@ -225,11 +235,13 @@ class Sim(CP):
         a = self.eff_current() if self.status == "Charging" else 0.0
         ph = self.phases
         currents = [a if i < ph else 0.0 for i in range(3)]
+        if a and RAMP_L1_SECONDS and __import__("time").time() - getattr(self, "charge_start", 0) < RAMP_L1_SECONDS:
+            currents[0] = 0.66
         sv = [
             {"measurand": "Energy.Active.Import.Register", "unit": "Wh", "value": f"{self.energy_wh:.0f}"},
             {"measurand": "Power.Active.Import", "unit": "W", "value": f"{self.power_w:.0f}"},
         ] + [
-            {"measurand": "Current.Import", "unit": "A", "phase": f"L{i+1}", "value": f"{c:.1f}"} for i, c in enumerate(currents)
+            {"measurand": "Current.Import", "unit": "A", "phase": f"L{i+1}", "value": f"{c:.2f}"} for i, c in enumerate(currents)
         ] + [
             {"measurand": "Voltage", "unit": "V", "phase": f"L{i+1}-N", "value": "230.0"} for i in range(3)
         ]

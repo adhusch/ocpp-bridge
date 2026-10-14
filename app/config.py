@@ -80,6 +80,9 @@ class Config:
     voltage: float = field(default_factory=lambda: float(os.environ.get("VOLTAGE", "230")))
     # Höchstleistung der Wallbox in W für Watt-Profile; leer = automatisch ermitteln
     max_power: Optional[int] = field(default_factory=lambda: _opt_int("MAX_POWER"))
+    # Watt-Profile an die gemessene Phasenzahl anpassen (nur bei stabilen Messwerten).
+    # Standard aus: wie EVCC mit 3 Phasen rechnen, solange EVCC keine Phasen vorgibt.
+    phase_detect: bool = field(default_factory=lambda: _bool("PHASE_DETECT", False))
     # Standard-Ladestrom, bis EVCC einen Wert vorgibt
     default_current: float = field(default_factory=lambda: float(os.environ.get("DEFAULT_CURRENT", "6")))
 

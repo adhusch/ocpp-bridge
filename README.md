@@ -81,7 +81,11 @@ Stand 04.10.2026, **Solax X3-HAC** (Modell `SPACS000001`, Firmware `012.04`), Br
 - Ohne PV-Überschuss im Modus „Smart“ lädt das Auto nicht, wie es sein soll.
 - **Das 0-W-Profil wird eingehalten:** Die Box geht von `Charging` auf `SuspendedEVSE`, die Bridge meldet „Limit 0 A wird eingehalten“.
 - **Das 6-A-Profil (4140 W) wird eingehalten:** Mit „immer laden, mindestens 6 A“ lädt das Auto mit ~6 A pro Phase. Die Strombegrenzung per OCPP funktioniert also mit `TxDefaultProfile`, Watt, Stack Level 2.
-- **16 A = 11 040 W lehnt die 11-kW-Box ab (`Rejected`).** Dadurch blieb das 0-W-Profil aktiv und „Sofort“ lud gar nicht. Die Bridge kappt Watt-Limits deshalb jetzt bei einer Ablehnung schrittweise (11 000 W, …) und merkt sich den akzeptierten Höchstwert (fest einstellbar mit `MAX_POWER`).
+- **Die Box lehnt Watt-Limits außerhalb eines Bereichs ab (`Rejected`):** 11 040 W und 11 000 W abgelehnt, 7 400 W angenommen; 2 760 W abgelehnt, 4 140 W angenommen. Ungebremst lud das Auto mit ~12,2 A ≈ 8,3 kW. Vermutlich lehnt die Box alles über ihrem eingestellten Maximalstrom (Solax-App) und alles unter 6 A × 3 Phasen ab.
+  - Bei einer Ablehnung sucht die Bridge den Höchstwert auf 100 W genau und speichert ihn (`max_power_w`, fest einstellbar mit `MAX_POWER`). Vorher blieb bei 16 A das 0-W-Profil aktiv und „Sofort“ lud gar nicht.
+  - Abgelehnte Limits ändern nie das aktive Profil. Löschen würde ungebremstes Laden bedeuten.
+  - **1-phasiges Laden ist per OCPP mit der Solax nicht möglich**, weil 1 Phase × 6–16 A unter 4 140 W liegt. Den EVCC-Block `phases1p3p` deshalb nicht aktivieren.
+- **Phasenerkennung:** Beim Hochfahren stand L1 kurz bei 0,66 A, während L2/L3 schon ~6 A zogen. Die Bridge hielt das für 2-phasiges Laden und rechnete Watt-Limits falsch um. Sie rechnet jetzt wie EVCC fest mit 3 Phasen; die Erkennung ist optional (`PHASE_DETECT=true`) und braucht 3 übereinstimmende Messwerte.
 - Weiterhin ungetestet: Phasenumschaltung per OCPP. Laut EVCC-Forum unterstützte die Solax-Firmware das bis Anfang 2026 nicht.
 - Der Zählerstand kam im Leerlauf trotz `ClockAlignedDataInterval` nicht an, erst ab Ladebeginn. Für EVCC ist das unkritisch, die Sitzungsenergie stimmt.
 
@@ -109,6 +113,7 @@ Phasenumschaltung: Den auskommentierten Block `tos: true` / `phases1p3p` aktivie
 | `RATE_UNIT` | `auto` | Einheit der Ladeprofile: `auto` (wie von der Wallbox gemeldet), `A` oder `W` |
 | `VOLTAGE` | `230` | Spannung für die Umrechnung von A in W |
 | `MAX_POWER` | leer | Höchstleistung der Wallbox in W für Watt-Profile; leer = automatisch beim ersten `Rejected` ermitteln |
+| `PHASE_DETECT` | `false` | Watt-Limits an die gemessene Phasenzahl anpassen (erst nach 3 stabilen Messwerten); sonst wie EVCC 3 Phasen |
 | `OCPP_PASSWORD` | leer | Basic-Auth-Passwort für die Wallbox |
 | `API_TOKEN` | leer | Bearer-Token für `/api/*` (Statusseite dann mit `?token=…` öffnen) |
 | `CONNECTOR_ID` | `1` | Ladepunkt-Nummer an der Wallbox |
@@ -143,7 +148,7 @@ pip install -r requirements-dev.txt
 pytest -v tests/
 ```
 
-`tests/sim_wallbox.py` simuliert eine Solax-ähnliche Wallbox mit Steuer-API (einstecken, abstecken, RFID). Mit `SOLAX_QUIRKS=1` verhält sie sich wie die echte X3-HAC mit Firmware 012.04 (siehe oben). Mit `HONOR_PROFILES` und `MIN_STACK` lässt sich eine Wallbox nachbilden, die Profile annimmt, aber ignoriert. Die Tests decken ab: Einrichtung, kein Laden vor EVCC-Freigabe, Stack Level aus der Wallbox, Wechsel auf eine wirksame Profilvariante, Kappung auf die Nennleistung der Wallbox, Pause per Remote Stop bei komplett ignorierten Profilen, Remote Start beim Einstecken, Freigabe/Pause/Stromänderung, Phasenumschaltung, wallbox-seitiges Plug & Charge, RFID-Allowlist, Fallback ohne Ladeprofile, Neustart der Bridge mitten im Laden, Watt-Profile der Solax inklusive einphasig ladendem Auto, Verbindung ohne ID im Pfad, noch nie verbundene Wallbox, OCPP-Passwort und API-Token.
+`tests/sim_wallbox.py` simuliert eine Solax-ähnliche Wallbox mit Steuer-API (einstecken, abstecken, RFID). Mit `SOLAX_QUIRKS=1` verhält sie sich wie die echte X3-HAC mit Firmware 012.04 (siehe oben). Mit `HONOR_PROFILES` und `MIN_STACK` lässt sich eine Wallbox nachbilden, die Profile annimmt, aber ignoriert. Die Tests decken ab: Einrichtung, kein Laden vor EVCC-Freigabe, Stack Level aus der Wallbox, Wechsel auf eine wirksame Profilvariante, Suche der Höchstleistung der Wallbox, abgelehnte Limits lassen das aktive Profil unverändert, Hochfahren wird nicht als 2-phasig gedeutet, Pause per Remote Stop bei komplett ignorierten Profilen, Remote Start beim Einstecken, Freigabe/Pause/Stromänderung, Phasenumschaltung, wallbox-seitiges Plug & Charge, RFID-Allowlist, Fallback ohne Ladeprofile, Neustart der Bridge mitten im Laden, Watt-Profile der Solax inklusive einphasig ladendem Auto, Verbindung ohne ID im Pfad, noch nie verbundene Wallbox, OCPP-Passwort und API-Token.
 
 `tests/test_evcc_integration.py` startet zusätzlich ein **echtes EVCC** mit dem Charger-Block aus `evcc-charger.yaml` und einem simulierten Hausnetz. Drei Szenarien: Ampere-Profile, Watt-Profile der Solax und eine Solax, die das Standardprofil ignoriert. Geprüft werden jeweils, dass ohne Freigabe nicht geladen wird, Sofortladen, PV-Überschussregelung, Umschaltung von 3 auf 1 Phase bei wenig PV (unter 3 × 6 A ≈ 4,1 kW), Pause und Abstecken. Lokal mit `EVCC_BIN=/pfad/zu/evcc pytest tests/test_evcc_integration.py`. Die GitHub-Action lädt dafür bei jedem Lauf die neueste EVCC-Version und läuft zusätzlich jeden Montag, damit neue EVCC-Versionen automatisch geprüft werden.
 
