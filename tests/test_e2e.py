@@ -141,14 +141,14 @@ def test_plug_and_charge_remote_start_and_evcc_control(tmp_path):
 
         # EVCC: Strom setzen und freigeben
         assert http("POST", e.api("/api/_/maxcurrent"), "10")["result"] == "stored"
-        assert http("POST", e.api("/api/_/enable"), "true")["result"] == "Accepted"
+        assert http("POST", e.api("/api/_/enable"), "true")["result"].startswith("queued")
         st = wait_for(lambda: (s := e.state())["status"] == "C" and s["power"] > 6000 and s, msg="lädt mit 10 A")
         assert st["enabled"] is True and st["currents"] == [10.0, 10.0, 10.0]
         assert http("GET", e.api("/api/_/status")) == "C"
         assert http("GET", e.api("/api/_/enabled")) is True  # Antworttext "true"
 
         # Strom ändern (EVCC-Format: ${maxcurrent:%d} als Body)
-        assert http("POST", e.api("/api/_/maxcurrent"), "16")["result"] == "Accepted"
+        assert http("POST", e.api("/api/_/maxcurrent"), "16")["result"].startswith("queued")
         wait_for(lambda: e.state()["power"] > 11000, msg="lädt mit 16 A")
 
         # Phasenumschaltung 1p
@@ -419,6 +419,25 @@ def test_rejected_small_limit_keeps_previous(tmp_path):
         wait_for(lambda: any("bisheriges Limit 10 A bleibt aktiv" in t for t in e.events()), msg="abgelehnt, altes Limit bleibt")
         sim = e.simstate()
         assert sim["limit_w"] == 6900.0 and not any(r.startswith("ClearChargingProfile") for r in sim["received"])
+
+
+def test_evcc_requests_answer_fast_with_slow_wallbox(tmp_path):
+    # Realer Fall 23.10.: Solax antwortet langsam, Höchstleistungssuche + Remote Start > 10 s
+    # → EVCC meldete "charger enable: ... Client.Timeout exceeded"
+    with running(tmp_path, sim_env={"SOLAX_QUIRKS": "1", "MAX_POWER_W": "9380", "REPLY_DELAY": "1.5"}) as e:
+        e.simctl("plug")
+        time.sleep(2)
+        http("POST", e.api("/api/_/maxcurrent"), "16")
+        t0 = time.time()
+        http("POST", e.api("/api/_/enable"), "true")
+        assert time.time() - t0 < 1.0, "Antwort an EVCC zu langsam"
+        st = wait_for(lambda: (s := e.state())["status"] == "C" and s["max_power_w"] and s, timeout=90,
+                      msg="lädt nach Höchstleistungssuche")
+        assert 9280 <= st["max_power_w"] <= 9380
+        # schnelle Wechsel werden der Reihe nach abgearbeitet, der letzte Stand gewinnt
+        for v in ("false", "true", "false"):
+            http("POST", e.api("/api/_/enable"), v)
+        wait_for(lambda: e.state()["ocpp_status"] == "SuspendedEVSE", timeout=60, msg="letzter Stand: Pause")
 
 
 def test_unknown_charger_reports_offline(tmp_path):

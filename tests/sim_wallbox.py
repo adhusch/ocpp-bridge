@@ -49,6 +49,8 @@ MIN_STACK = int(os.environ.get("MIN_STACK", "0"))
 MIN_POWER_W = float(os.environ.get("MIN_POWER_W", "4140" if os.environ.get("SOLAX_QUIRKS", "0") == "1" else "0"))
 # Hochfahren nachbilden: L1 steht nach dem Ladestart noch ein paar Sekunden bei 0,66 A
 RAMP_L1_SECONDS = float(os.environ.get("RAMP_L1_SECONDS", "0"))
+# Antwortverzögerung pro Befehl (echte Solax: ~1-2,5 s)
+REPLY_DELAY = float(os.environ.get("REPLY_DELAY", "0"))
 MAX_POWER_W = float(os.environ.get("MAX_POWER_W", "11000" if os.environ.get("SOLAX_QUIRKS", "0") == "1" else "0"))
 CAR_MAX_A = float(os.environ.get("CAR_MAX_A", "16"))
 CAR_PHASES = int(os.environ.get("CAR_PHASES", "3"))
@@ -170,7 +172,9 @@ class Sim(CP):
         return call_result.TriggerMessage(status="Accepted")
 
     @on("SetChargingProfile")
-    def set_profile(self, connector_id, cs_charging_profiles):
+    async def set_profile(self, connector_id, cs_charging_profiles):
+        if REPLY_DELAY:
+            await asyncio.sleep(REPLY_DELAY)
         p = cs_charging_profiles
         sched = p["charging_schedule"]
         period = sched["charging_schedule_period"][0]
@@ -205,7 +209,9 @@ class Sim(CP):
         return call_result.ClearChargingProfile(status="Accepted")
 
     @on("RemoteStartTransaction")
-    def remote_start(self, id_tag, **kw):
+    async def remote_start(self, id_tag, **kw):
+        if REPLY_DELAY:
+            await asyncio.sleep(REPLY_DELAY)
         self.received.append(f"RemoteStartTransaction {id_tag}")
         if not self.plugged or self.tx_id is not None:
             return call_result.RemoteStartTransaction(status="Rejected")

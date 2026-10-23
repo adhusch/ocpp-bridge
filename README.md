@@ -95,6 +95,11 @@ Den Inhalt von `evcc-charger.yaml` in die `evcc.yaml` übernehmen und `192.168.1
 
 Phasenumschaltung: Den auskommentierten Block `tos: true` / `phases1p3p` aktivieren. Das klappt nur, wenn die Wallbox `numberPhases` in Ladeprofilen umsetzt – auf der Statusseite prüfbar.
 
+**Test mit zweitem Auto (23.10.2026)**
+- Eingesteckt im Modus „Smart“ ohne Überschuss: lädt nicht, wie es sein soll.
+- „Sofort“: lädt mit ~13,5 A pro Phase ≈ 9,3 kW. „Aus“: Laden stoppt sofort.
+- EVCC meldete beim Freigeben `charger enable: … Client.Timeout exceeded`: EVCC wartet höchstens 10 s auf eine HTTP-Antwort, die Bridge antwortete erst nach der kompletten Abstimmung mit der langsamen Solax (bis ~2,5 s pro Befehl, dazu die Höchstleistungssuche). Die HTTP-API antwortet jetzt sofort, die Befehle an die Wallbox laufen im Hintergrund nacheinander, und bei schnellen Wechseln gewinnt der letzte Stand.
+
 ## Einstellungen (Umgebungsvariablen)
 
 | Variable | Standard | Bedeutung |
@@ -148,7 +153,7 @@ pip install -r requirements-dev.txt
 pytest -v tests/
 ```
 
-`tests/sim_wallbox.py` simuliert eine Solax-ähnliche Wallbox mit Steuer-API (einstecken, abstecken, RFID). Mit `SOLAX_QUIRKS=1` verhält sie sich wie die echte X3-HAC mit Firmware 012.04 (siehe oben). Mit `HONOR_PROFILES` und `MIN_STACK` lässt sich eine Wallbox nachbilden, die Profile annimmt, aber ignoriert. Die Tests decken ab: Einrichtung, kein Laden vor EVCC-Freigabe, Stack Level aus der Wallbox, Wechsel auf eine wirksame Profilvariante, Suche der Höchstleistung der Wallbox, abgelehnte Limits lassen das aktive Profil unverändert, Hochfahren wird nicht als 2-phasig gedeutet, Pause per Remote Stop bei komplett ignorierten Profilen, Remote Start beim Einstecken, Freigabe/Pause/Stromänderung, Phasenumschaltung, wallbox-seitiges Plug & Charge, RFID-Allowlist, Fallback ohne Ladeprofile, Neustart der Bridge mitten im Laden, Watt-Profile der Solax inklusive einphasig ladendem Auto, Verbindung ohne ID im Pfad, noch nie verbundene Wallbox, OCPP-Passwort und API-Token.
+`tests/sim_wallbox.py` simuliert eine Solax-ähnliche Wallbox mit Steuer-API (einstecken, abstecken, RFID). Mit `SOLAX_QUIRKS=1` verhält sie sich wie die echte X3-HAC mit Firmware 012.04 (siehe oben). Mit `HONOR_PROFILES` und `MIN_STACK` lässt sich eine Wallbox nachbilden, die Profile annimmt, aber ignoriert. Die Tests decken ab: Einrichtung, kein Laden vor EVCC-Freigabe, Stack Level aus der Wallbox, Wechsel auf eine wirksame Profilvariante, Suche der Höchstleistung der Wallbox, schnelle Antworten an EVCC trotz langsamer Wallbox, abgelehnte Limits lassen das aktive Profil unverändert, Hochfahren wird nicht als 2-phasig gedeutet, Pause per Remote Stop bei komplett ignorierten Profilen, Remote Start beim Einstecken, Freigabe/Pause/Stromänderung, Phasenumschaltung, wallbox-seitiges Plug & Charge, RFID-Allowlist, Fallback ohne Ladeprofile, Neustart der Bridge mitten im Laden, Watt-Profile der Solax inklusive einphasig ladendem Auto, Verbindung ohne ID im Pfad, noch nie verbundene Wallbox, OCPP-Passwort und API-Token.
 
 `tests/test_evcc_integration.py` startet zusätzlich ein **echtes EVCC** mit dem Charger-Block aus `evcc-charger.yaml` und einem simulierten Hausnetz. Drei Szenarien: Ampere-Profile, Watt-Profile der Solax und eine Solax, die das Standardprofil ignoriert. Geprüft werden jeweils, dass ohne Freigabe nicht geladen wird, Sofortladen, PV-Überschussregelung, Umschaltung von 3 auf 1 Phase bei wenig PV (unter 3 × 6 A ≈ 4,1 kW), Pause und Abstecken. Lokal mit `EVCC_BIN=/pfad/zu/evcc pytest tests/test_evcc_integration.py`. Die GitHub-Action lädt dafür bei jedem Lauf die neueste EVCC-Version und läuft zusätzlich jeden Montag, damit neue EVCC-Versionen automatisch geprüft werden.
 

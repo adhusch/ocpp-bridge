@@ -58,6 +58,8 @@ class ChargePoint(OcppChargePoint):
         self._detected_phases: Optional[int] = None
         self._phase_hist: deque = deque(maxlen=3)
         self._accepted_target: Optional[float] = None  # zuletzt von der Wallbox angenommenes Limit
+        self._apply_task: Optional[asyncio.Task] = None
+        self._apply_dirty = False
         self.max_stack_level = 0       # aus ChargeProfileMaxStackLevel
         # Durchsetzung: zuletzt gesetztes Limit und Messungen danach
         self._target: Optional[float] = None
@@ -191,7 +193,7 @@ class ChargePoint(OcppChargePoint):
                 self.st.energy_kwh = self.st.meter_start_wh / 1000.0
             self._event(f"StartTransaction #{tx_id} (Tag {id_tag}, Zähler {meter_start} Wh)")
             # Sollwert sofort durchsetzen (z. B. 0 A, wenn EVCC gerade pausiert)
-            self._spawn(self.apply(), 0.5)
+            self.request_apply(delay=0.5)
         else:
             self._event(f"StartTransaction mit unbekanntem Tag {id_tag} abgelehnt")
         self.store.save()
@@ -698,6 +700,23 @@ class ChargePoint(OcppChargePoint):
                     + f" [{profile['charging_profile_purpose']}, Stack {profile['stack_level']}, Connector {connector}]"
                     + f": {status}")
         return status
+
+    def request_apply(self, delay: float = 0.0) -> str:
+        """Sollzustand im Hintergrund übertragen, nacheinander und zusammengefasst.
+
+        Die HTTP-API antwortet sofort (EVCC bricht nach 10 s ab). Kommen während einer
+        Übertragung neue Vorgaben, wird danach genau einmal mit dem neuesten Stand nachgezogen.
+        """
+        self._apply_dirty = True
+        if self._apply_task is None or self._apply_task.done():
+            self._apply_task = self._spawn(self._apply_worker(), delay)
+            return "queued"
+        return "queued (läuft bereits)"
+
+    async def _apply_worker(self):
+        while self._apply_dirty:
+            self._apply_dirty = False
+            await self.apply()
 
     async def apply(self) -> str:
         """Sollzustand (enabled, Strom, Phasen) auf die Wallbox übertragen."""

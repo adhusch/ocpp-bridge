@@ -191,7 +191,8 @@ class Bridge:
         if changed:
             self.store.event(cp_id, f"EVCC: {'Freigabe' if enable else 'Pause'}")
         self.store.save()
-        status = await cp.apply() if cp else "offline"
+        # sofort antworten: EVCC wartet höchstens 10 s, die Wallbox-Kommunikation läuft im Hintergrund
+        status = cp.request_apply() if cp else "offline"
         return web.json_response({"enable": enable, "result": status})
 
     async def api_maxcurrent(self, request):
@@ -204,7 +205,7 @@ class Bridge:
         self.store.save()
         status = "stored"
         if cp and st.desired_enabled and (changed or st.last_profile_status != "Accepted"):
-            status = await cp.set_current(current)
+            status = cp.request_apply()
         return web.json_response({"maxcurrent": current, "result": status})
 
     async def api_phases(self, request):
@@ -215,7 +216,7 @@ class Bridge:
         st.phases = phases
         self.store.save()
         self.store.event(cp_id, f"EVCC: Phasen {phases}")
-        status = await cp.apply() if cp else "offline"
+        status = cp.request_apply() if cp else "offline"
         return web.json_response({"phases": phases, "result": status})
 
     async def api_action(self, request):
