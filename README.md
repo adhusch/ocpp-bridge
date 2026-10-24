@@ -100,6 +100,19 @@ Phasenumschaltung: Den auskommentierten Block `tos: true` / `phases1p3p` aktivie
 - „Sofort“: lädt mit ~13,5 A pro Phase ≈ 9,3 kW. „Aus“: Laden stoppt sofort.
 - EVCC meldete beim Freigeben `charger enable: … Client.Timeout exceeded`: EVCC wartet höchstens 10 s auf eine HTTP-Antwort, die Bridge antwortete erst nach der kompletten Abstimmung mit der langsamen Solax (bis ~2,5 s pro Befehl, dazu die Höchstleistungssuche). Die HTTP-API antwortet jetzt sofort, die Befehle an die Wallbox laufen im Hintergrund nacheinander, und bei schnellen Wechseln gewinnt der letzte Stand.
 
+**24.10.2026:** In der Solax war ein Maximalstrom von 14 A eingestellt (14 A × 3 × 230 V = 9 660 W). Das erklärt, warum die Box alles darüber ablehnte. Nach dem Ändern meldet sich die Box mit einer neuen `BootNotification`. Die Bridge verwirft dann die gespeicherte Höchstleistung und ermittelt sie neu.
+
+### Phasenumschaltung testen
+
+Ob eine Wallbox per OCPP auf 1 Phase umschaltet, prüft ein eingebauter Test. Voraussetzung: Auto steckt und lädt (EVCC auf „Sofort“).
+
+```bash
+curl -X POST http://<host>:8887/api/<ID>/test/phases          # Start, ~6 Minuten
+curl http://<host>:8887/api/<ID>/test/phases                  # Ergebnis
+```
+
+Der Test schickt nacheinander 3 Phasen × 6 A sowie 1 Phase × 6, 10 und 16 A, jeweils mit `numberPhases`. Nach jedem Schritt wartet er 90 s (`?wait=…`) und bewertet die gemessenen Ströme: „wirkt“, „abgelehnt“, „lädt weiter 3-phasig“ oder „pausiert“. EVCC-Vorgaben werden während des Tests zurückgestellt und danach wiederhergestellt. Das Ergebnis erscheint auch im Ereignisprotokoll der Statusseite.
+
 ## Einstellungen (Umgebungsvariablen)
 
 | Variable | Standard | Bedeutung |
@@ -144,6 +157,7 @@ Phasenumschaltung: Den auskommentierten Block `tos: true` / `phases1p3p` aktivie
 | POST | `/api/<cp>/start` · `stop` · `unlock` · `reset` · `apply` · `setup` | manuelle Befehle |
 | POST | `/api/<cp>/trigger/<Nachricht>` | `TriggerMessage`, z. B. `StatusNotification` |
 | GET/POST | `/api/<cp>/configuration` | `GetConfiguration` bzw. `ChangeConfiguration` (`{"key":…, "value":…}`) |
+| POST/GET | `/api/<cp>/test/phases` | Phasentest starten bzw. Ergebnis abfragen (siehe „Phasenumschaltung testen“) |
 | GET | `/api/chargers`, `/api/events`, `/health` | Übersicht, Ereignisprotokoll, Healthcheck |
 
 ## Tests

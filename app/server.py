@@ -243,6 +243,19 @@ class Bridge:
             raise web.HTTPNotFound(text=f"Aktion {action} unbekannt")
         return web.json_response({"action": action, "result": res})
 
+    async def api_phase_test(self, request):
+        _, _, cp = self._resolve(request)
+        if cp is None:
+            raise web.HTTPServiceUnavailable(text="Wallbox nicht verbunden")
+        if request.method == "GET":
+            return web.json_response(cp.phase_test_report or {"info": "noch kein Phasentest gelaufen"})
+        if cp.phase_test_report.get("running"):
+            return web.json_response({"result": "läuft bereits"})
+        wait = float(request.query.get("wait", "90"))
+        cp._spawn(cp.phase_test(wait))
+        return web.json_response({"result": "gestartet", "dauer_s": int(wait * len(cp.PHASE_TEST_STEPS)) + 20,
+                                  "ergebnis": f"GET {request.path}"})
+
     async def api_trigger(self, request):
         _, _, cp = self._resolve(request)
         if cp is None:
@@ -291,6 +304,7 @@ class Bridge:
         r.add_route("*", "/api/{cp}/enable", self.api_enable)
         r.add_route("*", "/api/{cp}/maxcurrent", self.api_maxcurrent)
         r.add_route("*", "/api/{cp}/phases", self.api_phases)
+        r.add_route("*", "/api/{cp}/test/phases", self.api_phase_test)
         r.add_post("/api/{cp}/trigger/{message}", self.api_trigger)
         r.add_route("*", "/api/{cp}/configuration", self.api_configuration)
         r.add_post("/api/{cp}/{action:start|stop|unlock|reset|apply|setup}", self.api_action)

@@ -198,8 +198,8 @@ class Sim(CP):
         else:
             self.limit_w = None
             self.limit_a = float(period["limit"])
-        if period.get("number_phases"):
-            self.phases = int(period["number_phases"])
+        # OCPP: fehlt numberPhases, gilt 3 (das Auto kann trotzdem weniger Phasen nutzen)
+        self.phases = min(int(period.get("number_phases") or 3), CAR_PHASES)
         asyncio.create_task(self.update_charging())
         return call_result.SetChargingProfile(status="Accepted")
 

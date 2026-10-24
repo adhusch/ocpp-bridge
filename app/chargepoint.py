@@ -59,6 +59,8 @@ class ChargePoint(OcppChargePoint):
         self._phase_hist: deque = deque(maxlen=3)
         self._accepted_target: Optional[float] = None  # zuletzt von der Wallbox angenommenes Limit
         self._apply_task: Optional[asyncio.Task] = None
+        self._testing = False
+        self.phase_test_report: dict = {}
         self._apply_dirty = False
         self.max_stack_level = 0       # aus ChargeProfileMaxStackLevel
         # Durchsetzung: zuletzt gesetztes Limit und Messungen danach
@@ -116,6 +118,11 @@ class ChargePoint(OcppChargePoint):
         self.st.firmware = kw.get("firmware_version", "") or ""
         self.st.serial = kw.get("charge_point_serial_number", "") or kw.get("charge_box_serial_number", "") or ""
         self._event(f"BootNotification {self.st.vendor} {self.st.model} FW {self.st.firmware}")
+        if self.st.max_power_w and not self.cfg.max_power:
+            # Einstellungen der Wallbox (z. B. Maximalstrom) können sich geändert haben → neu ermitteln
+            self._event(f"Gespeicherte Höchstleistung {self.st.max_power_w:g} W verworfen, wird neu ermittelt")
+            self.st.max_power_w = None
+            self.st.max_power_rejected = None
         self._setup_done = False
         self.schedule_setup(2.0, force=True)
         self.store.save()
@@ -263,7 +270,7 @@ class ChargePoint(OcppChargePoint):
     # ------------------------------------------------- Durchsetzung des Limits
     def _check_limit(self):
         """Prüft nach jedem Messwert, ob die Wallbox das gesetzte Limit einhält."""
-        if not self.cfg.enforce or self._target is None or self._enforcing:
+        if not self.cfg.enforce or self._target is None or self._enforcing or self._testing:
             return
         if time.time() - self._target_ts < self.cfg.enforce_grace:
             return
@@ -339,7 +346,82 @@ class ChargePoint(OcppChargePoint):
         self.st.profile_variant = 0
         self.st.profiles_ignored = False
         self.st.profile_effective = None
+        self.st.max_power_w = None
+        self.st.max_power_rejected = None
         self.store.save()
+
+    # ------------------------------------------------- Diagnose: Phasenumschaltung
+    PHASE_TEST_STEPS = ((3, 6.0), (1, 6.0), (1, 10.0), (1, 16.0))
+
+    def _judge_step(self, phases: int, current: float, status: str, currents: list, ocpp_status: str) -> str:
+        if status != "Accepted":
+            return f"abgelehnt ({status})"
+        l1, l2, l3 = (list(currents) + [0, 0, 0])[:3]
+        active = [c for c in (l1, l2, l3) if c > 1.0]
+        if ocpp_status != "Charging" or not active:
+            return "angenommen, Auto lädt nicht (pausiert)"
+        if len(active) == phases and all(abs(c - current) <= 1.5 for c in active):
+            return f"wirkt: {phases}-phasig mit ~{current:g} A"
+        if phases == 1 and len(active) == 3:
+            return (f"angenommen, lädt aber weiter 3-phasig mit ~{max(active):.1f} A "
+                    "(Wallbox schaltet nicht um, teilt das Watt-Limit auf 3 Phasen)")
+        return f"unklar: Ströme {l1:.1f}/{l2:.1f}/{l3:.1f} A"
+
+    async def phase_test(self, wait: float = 90.0):
+        """Probiert 3p×6 A und 1p×6/10/16 A mit numberPhases und protokolliert die gemessenen Ströme."""
+        steps = []
+        self.phase_test_report = {"running": True, "started": now_iso(), "wait_s": wait, "steps": steps}
+        if self.st.ocpp_status not in ("Charging", "SuspendedEVSE", "SuspendedEV"):
+            self.phase_test_report.update(running=False, error="Kein Ladevorgang aktiv: Auto einstecken und in EVCC "
+                                                                "'Sofort' wählen, dann Test starten")
+            self._event("Phasentest abgebrochen: kein Ladevorgang aktiv")
+            return
+        orig_phases = self.st.phases
+        self._testing = True
+        # laufende Übertragung der EVCC-Vorgabe abwarten, neue werden bis zum Testende zurückgestellt
+        if self._apply_task is not None and not self._apply_task.done():
+            await asyncio.wait([self._apply_task], timeout=120)
+        self._event(f"Phasentest startet ({len(self.PHASE_TEST_STEPS)} Schritte à {wait:g} s)")
+        try:
+            for phases, current in self.PHASE_TEST_STEPS:
+                self.st.phases = phases
+                status, connector, profile, unit = await self._send_profile(current)
+                limit = profile["charging_schedule"]["charging_schedule_period"][0]["limit"]
+                self._event(f"Phasentest: {phases}p × {current:g} A (= {limit:g} {unit}, numberPhases {phases}): "
+                            f"{status} – warte {wait:g} s")
+                if status == "Accepted":
+                    await asyncio.sleep(wait)
+                currents = list(self.st.currents)
+                verdict = self._judge_step(phases, current, status, currents, self.st.ocpp_status)
+                steps.append({"phases": phases, "current": current, "limit": limit, "unit": unit,
+                              "profile_status": status, "currents": currents, "power_w": self.st.power_w,
+                              "ocpp_status": self.st.ocpp_status, "result": verdict})
+                self._event(f"Phasentest: {phases}p × {current:g} A → {verdict}")
+        finally:
+            self.st.phases = orig_phases
+            if not orig_phases:
+                # ausdrücklich zurück auf 3 Phasen, falls die Wallbox eine fehlende Angabe als "unverändert" deutet
+                self._force_phases = 3
+                try:
+                    st3 = await self._send_profile(0.0 if not self.st.desired_enabled else self.st.max_current)
+                    self._event(f"Phasentest: zurück auf 3 Phasen: {st3[0]}")
+                except Exception as e:
+                    self._event(f"Phasentest: Rückstellung fehlgeschlagen: {e!r}")
+                finally:
+                    self._force_phases = None
+            self._testing = False
+            one_p = [s for s in steps if s["phases"] == 1]
+            if one_p and all(s["result"].startswith("wirkt") for s in one_p):
+                summary = "1-phasiges Laden per OCPP funktioniert – phases1p3p in EVCC kann aktiviert werden"
+            elif one_p and all(s["result"].startswith("abgelehnt") for s in one_p):
+                summary = "Wallbox lehnt 1-phasige Profile ab – Phasenumschaltung per OCPP nicht möglich"
+            elif one_p:
+                summary = "Wallbox schaltet per OCPP nicht zuverlässig auf 1 Phase – phases1p3p nicht aktivieren"
+            else:
+                summary = "Test unvollständig"
+            self.phase_test_report.update(running=False, finished=now_iso(), summary=summary)
+            self._event(f"Phasentest beendet: {summary}")
+            self.request_apply()  # EVCC-Vorgabe wiederherstellen
 
     def _parse_sampled(self, samples: list, connector0: bool):
         power_total = None
@@ -560,7 +642,7 @@ class ChargePoint(OcppChargePoint):
         # TxProfile braucht eine laufende Transaktion; vorher als Default-Profil setzen
         if purpose == "TxProfile" and self.st.transaction_id is None:
             purpose = "TxDefaultProfile"
-        phases = self.st.phases or None
+        phases = self._force_phases or self.st.phases or None
         if unit == "W":
             limit = float(int(self.cfg.voltage * current * self._active_phases()))
             cap = self._power_cap()
@@ -708,6 +790,8 @@ class ChargePoint(OcppChargePoint):
         Übertragung neue Vorgaben, wird danach genau einmal mit dem neuesten Stand nachgezogen.
         """
         self._apply_dirty = True
+        if self._testing:
+            return "zurückgestellt (Phasentest läuft)"
         if self._apply_task is None or self._apply_task.done():
             self._apply_task = self._spawn(self._apply_worker(), delay)
             return "queued"

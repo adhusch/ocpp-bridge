@@ -440,6 +440,56 @@ def test_evcc_requests_answer_fast_with_slow_wallbox(tmp_path):
         wait_for(lambda: e.state()["ocpp_status"] == "SuspendedEVSE", timeout=60, msg="letzter Stand: Pause")
 
 
+def _run_phase_test(e):
+    http("POST", e.api("/api/_/maxcurrent"), "16")
+    http("POST", e.api("/api/_/enable"), "true")
+    e.simctl("plug")
+    wait_for(lambda: e.state()["status"] == "C", msg="lädt")
+    assert http("POST", e.api("/api/_/test/phases?wait=4"), "")["result"] == "gestartet"
+    rep = wait_for(lambda: (r := http("GET", e.api("/api/_/test/phases"))).get("summary") and r,
+                   timeout=60, msg="Phasentest fertig")
+    return rep
+
+
+def test_phase_test_wallbox_that_switches(tmp_path):
+    with running(tmp_path, bridge_env={"RATE_UNIT": "W"}) as e:
+        rep = _run_phase_test(e)
+        assert [s["result"].split(":")[0] for s in rep["steps"]] == ["wirkt"] * 4, rep
+        assert rep["summary"].startswith("1-phasiges Laden per OCPP funktioniert")
+        # danach gilt wieder die EVCC-Vorgabe: 16 A, 3 Phasen
+        wait_for(lambda: e.state()["currents"] == [16.0, 16.0, 16.0], msg="EVCC-Vorgabe wiederhergestellt")
+
+
+def test_phase_test_solax_rejects_single_phase(tmp_path):
+    with running(tmp_path, sim_env={"SOLAX_QUIRKS": "1"}) as e:
+        rep = _run_phase_test(e)
+        assert rep["steps"][0]["result"].startswith("wirkt")
+        assert all(s["result"].startswith("abgelehnt") for s in rep["steps"][1:3]), rep
+        assert "nicht" in rep["summary"]
+
+
+def test_phase_test_needs_active_charging(tmp_path):
+    with running(tmp_path) as e:
+        http("POST", e.api("/api/_/test/phases?wait=1"), "")
+        rep = wait_for(lambda: (r := http("GET", e.api("/api/_/test/phases"))).get("error") and r, msg="Abbruch")
+        assert "Auto einstecken" in rep["error"]
+
+
+def test_max_power_redetected_after_boot(tmp_path):
+    # Nutzer hat den Maximalstrom in der Solax von 14 auf 16 A erhöht → gespeicherte Grenze verwerfen
+    import json
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "state.json").write_text(json.dumps(
+        {"next_tx_id": 1, "chargers": {"SIMSOLAX01": {"max_power_w": 9380.0, "max_power_rejected": 9420.0}}}))
+    with running(tmp_path, sim_env={"SOLAX_QUIRKS": "1"}) as e:
+        assert any("9380 W verworfen" in t for t in e.events())
+        http("POST", e.api("/api/_/maxcurrent"), "16")
+        http("POST", e.api("/api/_/enable"), "true")
+        e.simctl("plug")
+        wait_for(lambda: (s := e.state())["status"] == "C" and (s["max_power_w"] or 0) >= 10900, timeout=40,
+                 msg="neue Grenze 11000 W")
+
+
 def test_unknown_charger_reports_offline(tmp_path):
     # EVCC fragt eine Wallbox ab, die sich noch nie verbunden hat → offline statt 404
     env = Env(tmp_path, {}, {})
